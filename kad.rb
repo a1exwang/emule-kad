@@ -106,10 +106,8 @@ class KadClient
     end
   end
   def get_local_ip
-    if_name = `route | grep default`.split("\n").first.split.last
-    raise 'no local ip available' unless
-        `ifconfig #{if_name}` =~ /inet addr:([0-9.]+)/
-    $1
+    addrs = Socket.ip_address_list.reject { |x| ! x.ipv4? || x.ipv4_loopback? }
+    addrs.first.ip_address
   end
 
   def join
@@ -186,7 +184,7 @@ def parse_nodes_dat(bytes)
 end
 
 UDP_PORT = 4672
-TCP_PORT = 44422
+TCP_PORT = 4662
 open (ARGV[0] || 'nodes_cn.dat'), 'rb' do |f|
   @nodes = parse_nodes_dat f.read
 end
