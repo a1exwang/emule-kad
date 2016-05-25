@@ -468,9 +468,9 @@ main2 = {
     verified: 1
 }
 
-# @nodes.each do |node|
-#   kad_client.add_contact(node)
-# end
+@nodes.each do |node|
+  kad_client.add_contact(node)
+end
 kad_client.add_contact(main2)
 loop do
   # kad_client.hello

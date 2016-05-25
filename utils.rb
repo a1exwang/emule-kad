@@ -25,6 +25,9 @@ module Kademlia
       def self.from_uint32_be_byte_array(arr)
         new(arr.map { |x| x.to_s }.join('.'))
       end
+      def self.from_uint32_le_byte_array(arr)
+        new(arr.reverse.map { |x| x.to_s }.join('.'))
+      end
 
       def to_i
         (@numbers[0] << 24) + (@numbers[1] << 16) + (@numbers[2] << 8) + (@numbers[3] << 0)
@@ -194,7 +197,7 @@ module Kademlia
               Kademlia::Utils::KadID.new(id)
             end
             inner_field.at +0x10, [:array, 4,  :uint8], :ip, :map do |ip|
-              Kademlia::Utils::IPAddress.from_uint32_be_byte_array(ip)
+              Kademlia::Utils::IPAddress.from_uint32_le_byte_array(ip)
             end
             inner_field.at +0x14, :uint16, :udp_port
             inner_field.at +0x16, :uint16, :tcp_port
