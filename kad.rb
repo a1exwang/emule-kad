@@ -6,8 +6,12 @@ require 'pp'
 
 LOCAL_KAD_UDP_KEY = 0x22334455
 def get_udp_verify_key(ip)
-  Digest::MD5.digest([ip, LOCAL_KAD_UDP_KEY].pack('VV')).
-      unpack('VVVV').reduce(&:^) % 0xFFFFFFFE + 1
+  Digest::MD5.digest([ip, LOCAL_KAD_UDP_KEY].pack('VV')).unpack('VVVV').reduce(&:^) % 0xFFFFFFFE + 1
+end
+
+UDP_VERIFY_KEY = {}
+def find_udp_verify_key(ip, port)
+  UDP_VERIFY_KEY["#{ip}:#{port}"]
 end
 
 class KadPacket
@@ -74,10 +78,10 @@ class KadPacket
     #   +09 uint32  sender_verify_key
     #   +0d uint8[] +raw_packet+
     #
-    def self.encrypt_packet(ip, kad_id, raw_packet)
-      salt = 0 #Random.rand(0...(2<<16))
+    def self.encrypt_packet(random, ip, kad_id, raw_packet)
+      salt = random#0 #Random.rand(0...(2<<16))
 
-      key = [*kad_id, salt].pack('C16v')
+      key = kad_id.pack('C*') + [salt].pack('v')
       receiver_verify_key = 0
       sender_verify_key = get_udp_verify_key(ip)
 
@@ -93,32 +97,40 @@ class KadPacket
       rc4 = RC4.new(md5_key)
       enc_data = rc4.encrypt(to_enc)
 
-      [0x98, salt].pack('Cv') + enc_data
+      [0x0c, salt].pack('Cv') + enc_data
     end
     ##
     # decrypt packet, similar to encrypt_packet
-    def self.decrypt_packet(_ip, id, packet)
-      puts "dec key: #{id.map{|x|x.to_s(16)}.join(' ')}"
-      raise 'not kad and receiver key packet' unless (packet & 3) == 2
+    def self.decrypt_packet(ip, id, packet, remote_ip, remote_port)
+      if (packet[0] & 3) == 0
+        key_part = id
+      elsif (packet[0] & 3) == 2
+        key_part = [get_udp_verify_key(ip_from_s(ip))].pack('V').bytes
+      else
+        raise 'not kad and receiver key packet'
+      end
       salt = packet[1..2]
-      key = id + salt
+      key = key_part + salt
+      puts "dec key: #{key.map{|x|x.to_s(16)}.join(' ')}"
       md5_key = Digest::MD5.digest(key.pack('C*'))
       dec_packet = RC4.new(md5_key).decrypt(packet[3..-1].pack('C*'))
       magic = dec_packet[0, 4].unpack('V').first
       printf "decrypt_packet: magic = %08x\n", magic
-      if magic.pack('V') != KadPacket::MAGIC_VALUE_UDP_SYNC_CLIENT
+      if magic != KadPacket::MAGIC_VALUE_UDP_SYNC_CLIENT
         raise 'wrong magic'
       end
-      _sender_verify = dec_packet[4, 4]
-      _receiver_verify = dec_packet[8, 4]
-      _padding = dec_packet[12]
+      _sender_verify = dec_packet[4, 4].unpack('V').first
+      _receiver_verify = dec_packet[8, 4].unpack('V').first
+      _padding = dec_packet[12].unpack('C').first
+      puts 'sender verify: %08x, receiver verify: %08x, padding: %d' % [_sender_verify, _receiver_verify, _padding]
       dec_packet[13..-1].bytes
     end
 
     def self.check_and_encrypt(ip, kad_id, raw_packet, version)
       return raw_packet if version < KadPacket::KAD_VERSION_NEED_ENCRYPTION
 
-      self.encrypt_packet(ip, kad_id, raw_packet)
+      # Random.rand(0..65535)
+      self.encrypt_packet(0, ip, kad_id, raw_packet)
     end
 
     ##
@@ -152,12 +164,12 @@ class KadPacket
     # kad2_req
     # packet:
     #   +00 uint8[3]    kad_header
-    #   +03 uint8       search_type(+type+)
+    #   +03 uint8       max_required
     #   +04 uint8[16]   +target_id+
     #   +14 uint8[16]   sender_id(+self_id+)
-    def self.kad2_req(type, self_id, ip, contact_id, target_id, version)
+    def self.kad2_req(max_required, ip, contact_id, target_id, version)
       kad_packet = (kad_header(:kad2_req) +
-          [type, *target_id, *self_id]).pack('C*')
+          [max_required, *target_id, *contact_id]).pack('C*')
       check_and_encrypt(ip, contact_id, kad_packet, version)
     end
 
@@ -166,9 +178,9 @@ class KadPacket
     # packet:
     # search_type = 3
     # target_id = MD4(UTF8(keyword))
-    def self.kad2_keyword_req(self_id, ip, contact_id, version, keyword)
+    def self.kad2_keyword_req(ip, contact_id, version, keyword)
       target_id = OpenSSL::Digest::MD4.digest(keyword)
-      self.kad2_req(KadPacket::SearchType::KEYWORD, self_id, ip, contact_id, target_id.bytes, version)
+      self.kad2_req(2, ip, contact_id, target_id.bytes, version)
     end
 
     ##
@@ -181,12 +193,12 @@ class KadPacket
   end
 
 
-  def initialize(str, ip, id)
+  def initialize(str, ip, id, remote_ip, remote_port)
     raw_str = str
     protocol, opc = str[0..1].unpack('C2')
     if protocol != KAD_PROTOCOL
       puts protocol
-      str = Helpers.decrypt_packet(ip, id, raw_str.bytes).pack('C*')
+      str = Helpers.decrypt_packet(ip, id, raw_str.bytes, remote_ip, remote_port).pack('C*')
       protocol, opc = str[0..1].unpack('C2')
 
       raise "unknown protocol #{protocol}" unless protocol == KAD_PROTOCOL
@@ -200,6 +212,30 @@ class KadPacket
       when :kad2_hello_res
         hello_res = parse_hello_res(@bytes)
         puts hello_res
+      when :kad2_req
+        puts 'kad2_req'
+      when :kad2_res
+        puts 'kad2_res'
+        count = @bytes[0x10]
+        contacts = []
+        def parse_contact(bytes)
+          {
+              id: bytes[0, 16],
+              ip: bytes[16, 4],
+              udp_port: bytes[20] + bytes[21] << 8,
+              tcp_port: bytes[22] + bytes[23] << 8,
+              version: bytes[24]
+          }
+        end
+        count.times do |i|
+          contacts << parse_contact(@bytes[0x11 + 25 * i, 25])
+        end
+        result = {
+            count: count,
+            contacts: contacts
+        }
+        puts result
+        result
       else
     end
   end
@@ -225,7 +261,7 @@ class KadClient
   attr_reader :tcp_port, :udp_port, :mtu, :id
   def initialize(nodes, udp_port, tcp_port, mtu = 1500)
     @ip = KadClient.get_local_ip
-    @id = Array.new(16) { Random.rand(0...(2 << 8)) }
+    @id = Array.new(16) { Random.rand(0...(1 << 8)) }
     def @id.to_s
       self.map { |x| sprintf '%02x', x }.join('')
     end
@@ -248,8 +284,9 @@ class KadClient
     @udp_thread = Thread.new do
       loop do
         data, addr = @udp_socket.recvfrom(1500)
+        _, remote_port, _, remote_ip = addr
         begin
-          packet = KadPacket.new(data, @ip, @id)
+          packet = KadPacket.new(data, @ip, @id, remote_ip, remote_port)
         rescue Exception => e
           puts e
           raise e
@@ -304,13 +341,24 @@ class KadClient
   def keyword(w)
     @nodes.each do |node|
       begin
-      @udp_socket.send(KadPacket::Helpers.kad2_keyword_req(@id, node[:ip], node[:id], node[:version], w),
+      @udp_socket.send(KadPacket::Helpers.kad2_keyword_req(node[:ip], node[:id], node[:version], w),
                        0, ip_to_s(node[:ip]), node[:udp_port])
       puts "keyword '#{w}' to #{ip_to_s node[:ip]}:#{node[:udp_port]}"
       rescue Exception => e
         puts e
       end
+    end
+  end
 
+  def find_node(kad_id)
+    @nodes.each do |node|
+      begin
+        @udp_socket.send(KadPacket::Helpers.kad2_req(0xb, node[:ip], node[:id], kad_id, node[:version]),
+                         0, ip_to_s(node[:ip]), node[:udp_port])
+        puts "find node id '#{kad_id}' to #{ip_to_s node[:ip]}:#{node[:udp_port]}"
+      rescue Exception => e
+        puts e
+      end
     end
   end
 
@@ -379,10 +427,10 @@ end
 
 UDP_PORT = 46720
 TCP_PORT = 46620
-open (ARGV[0] || 'nodes.dat'), 'rb' do |f|
-  @nodes = parse_nodes_dat f.read
-end
-@nodes1 = [
+# open (ARGV[0] || 'nodes.dat'), 'rb' do |f|
+#   @nodes = parse_nodes_dat f.read
+# end
+@nodes = [
     {
         id: 'a5 21 f3 2d 63 9f a8 56 56 c6 3e c1 09 55 0f d6'.split.map {|x| x.to_i(16)} ,
         ip: ip_from_s(KadClient.get_local_ip),
@@ -393,14 +441,42 @@ end
         verified: 1
     }
 ]
+UDP_VERIFY_KEY[KadClient.get_local_ip + ':4672'] = [0x4656f255].pack('V').bytes
 
 kad_client = KadClient.new(@nodes, UDP_PORT, TCP_PORT)
 # kad_client.bootstrap
 #kad_client.icmp_ping_nodes
 loop do
-  kad_client.hello
-  kad_client.keyword('abc')
+  # kad_client.hello
+  # kad_client.keyword('abc')
+  kad_client.find_node(kad_client.id)
   sleep 100000#0.2
 end
 
 kad_client.join
+
+# packet = []
+# lines = File.read('enc.txt').split("\n")
+# lines.each do |line|
+#   packet += line.split[1..-1].map { |x| x.to_i(16) }
+# end
+#
+# dec = KadPacket::Helpers::decrypt_packet(
+#     [27,105,244,174].pack('C*').unpack('V').first,
+#     'a5 21 f3 2d 63 9f a8 56 56 c6 3e c1 09 55 0f d6'.split(' ').map{|x|x.to_i(16)},
+#     packet
+# )
+# (dec.size / 16 + 1).times do |i|
+#   puts dec[16*i, 16].map{|x| '%02x' % x }.join(' ')
+# end
+#
+# enc = KadPacket::Helpers::encrypt_packet(
+#     0x3f03,
+#     [27,105,244,174].pack('C*').unpack('V').first,
+#     'a5 21 f3 2d 63 9f a8 56 56 c6 3e c1 09 55 0f d6'.split(' ').map{|x|x.to_i(16)},
+#     dec.pack('C*')
+# )
+# puts 'enc:'
+# (enc.size / 16 + 1).times do |i|
+#   puts enc[16*i, 16].bytes.map{|x| '%02x' % x }.join(' ')
+# end
