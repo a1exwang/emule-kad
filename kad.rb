@@ -3,6 +3,7 @@ require 'rc4'
 require 'digest/md5'
 require 'openssl'
 require 'pp'
+require 'json'
 
 LOCAL_KAD_UDP_KEY = 0x22334455
 def get_udp_verify_key(ip)
@@ -97,7 +98,7 @@ class KadPacket
       rc4 = RC4.new(md5_key)
       enc_data = rc4.encrypt(to_enc)
 
-      [0x0c, salt].pack('Cv') + enc_data
+      [0x0C, salt].pack('Cv') + enc_data
     end
     ##
     # decrypt packet, similar to encrypt_packet
@@ -105,7 +106,7 @@ class KadPacket
       if (packet[0] & 3) == 0
         key_part = id
       elsif (packet[0] & 3) == 2
-        key_part = [get_udp_verify_key(ip_from_s(ip))].pack('V').bytes
+        key_part = [get_udp_verify_key(ip_from_s(remote_ip))].pack('V').bytes
       else
         raise 'not kad and receiver key packet'
       end
@@ -192,8 +193,7 @@ class KadPacket
     end
   end
 
-
-  def initialize(str, ip, id, remote_ip, remote_port)
+  def initialize(kad_client, str, ip, id, remote_ip, remote_port)
     raw_str = str
     protocol, opc = str[0..1].unpack('C2')
     if protocol != KAD_PROTOCOL
@@ -215,13 +215,13 @@ class KadPacket
       when :kad2_req
         puts 'kad2_req'
       when :kad2_res
-        puts 'kad2_res'
+        puts "kad2_res from #{ip}"
         count = @bytes[0x10]
         contacts = []
         def parse_contact(bytes)
           {
               id: bytes[0, 16],
-              ip: bytes[16, 4],
+              ip: bytes[16, 4].pack('C*').unpack('V').first,
               udp_port: bytes[20] + bytes[21] << 8,
               tcp_port: bytes[22] + bytes[23] << 8,
               version: bytes[24]
@@ -234,7 +234,10 @@ class KadPacket
             count: count,
             contacts: contacts
         }
-        puts result
+        contacts.each do |contact|
+          kad_client.add_contact(contact)
+        end
+        pp "got #{contacts.size} results"
         result
       else
     end
@@ -256,15 +259,37 @@ class KadPacket
     @bytes
   end
 end
-
+MY_FILE_NAME = 'kad.json'
 class KadClient
   attr_reader :tcp_port, :udp_port, :mtu, :id
+  def add_contact(contact)
+    @contacts.each do |c|
+      if c[:id] == contact[:id] || @id == contact[:id]
+        return
+      end
+    end
+    @contacts << contact
+  end
   def initialize(nodes, udp_port, tcp_port, mtu = 1500)
     @ip = KadClient.get_local_ip
-    @id = Array.new(16) { Random.rand(0...(1 << 8)) }
+
+    if File.exists?(MY_FILE_NAME) && (content = File.read(MY_FILE_NAME)).size > 0
+      begin
+        @id = JSON.parse(content)['kad']['id']
+      rescue JSON::JSONError
+        @id = nil
+      end
+    end
+    if @id == nil
+      @id = Array.new(16) { Random.rand(0...(1 << 8)) }
+      json = { kad: { id: @id } }
+      File.write(MY_FILE_NAME, json.to_json)
+    end
+
     def @id.to_s
       self.map { |x| sprintf '%02x', x }.join('')
     end
+    @contacts = []
     @nodes = nodes
     @mtu = mtu
     # @tcp_server = TCPServer.new(@ip, tcp_port)
@@ -285,16 +310,20 @@ class KadClient
       loop do
         data, addr = @udp_socket.recvfrom(1500)
         _, remote_port, _, remote_ip = addr
-        begin
-          packet = KadPacket.new(data, @ip, @id, remote_ip, remote_port)
-        rescue Exception => e
-          puts e
-          raise e
-        end
+        #begin
+          packet = KadPacket.new(self, data, @ip, @id, remote_ip, remote_port)
+        #rescue Exception => e
+        #  puts e
+        #  raise e
+        #end
 
         puts "#{addr[2]}:#{addr[1]}, packet: #{packet.to_s}"
       end
     end
+  end
+
+  def bootstrap_from_contacts
+    find_node(@contacts, @id)
   end
 
   def test_nodes
@@ -307,8 +336,14 @@ class KadClient
   # get global ip address at local machine
   # return value: String. e.g. '1.1.1.1'
   def self.get_local_ip
-    addrs = Socket.ip_address_list.reject { |x| ! x.ipv4? || x.ipv4_loopback? }
-    addrs.first.ip_address
+    interface = `route | grep default`.split.last
+    if `ifconfig #{interface}` =~ /inet addr:([.0-9]+)/i
+      $1
+    else
+      raise RuntimeError, 'cannot get local ip'
+    end
+    # addrs = Socket.ip_address_list.reject { |x| ! x.ipv4? || x.ipv4_loopback? }
+    # addrs.first.ip_address
   end
 
   ##
@@ -350,13 +385,13 @@ class KadClient
     end
   end
 
-  def find_node(kad_id)
-    @nodes.each do |node|
+  def find_node(contacts, kad_id)
+    contacts.each do |node|
       begin
         @udp_socket.send(KadPacket::Helpers.kad2_req(0xb, node[:ip], node[:id], kad_id, node[:version]),
                          0, ip_to_s(node[:ip]), node[:udp_port])
         puts "find node id '#{kad_id}' to #{ip_to_s node[:ip]}:#{node[:udp_port]}"
-      rescue Exception => e
+      rescue Errno::EINVAL => e
         puts e
       end
     end
@@ -387,14 +422,15 @@ end
 
 def node_to_s(node, i)
 
-  sprintf "  %d   %d  %-15s %5d %5d %s %s\n",
+  sprintf "  %d   %d  %-15s %5d %5d %s %s    %s\n",
           i,
           node[:version],
           ip_to_s(node[:ip]),
           node[:udp_port],
           node[:tcp_port],
           node[:kad_udp_key].map {|x| sprintf '%02x', x}.join(''),
-          node[:verified]
+          node[:verified],
+          node[:id].map {|x| '%02x' % x }.join(' ')
 end
 
 def parse_nodes_dat(bytes)
@@ -402,16 +438,16 @@ def parse_nodes_dat(bytes)
   version = bytes[4...8].unpack('V').first
   raise "nodes.dat version error: version: #{version}" if version != 2 && version != 3
   number_of_contacts = bytes[8...12].unpack('V').first
-  #puts version: version, n: number_of_contacts
+  # puts version: version, n: number_of_contacts
   nodes = []
   contact_size = 34
-  #puts ' idx Ver IP address       udp   tcp  kadUDPKey        verified'
+  # puts ' idx Ver IP address       udp   tcp  kadUDPKey        verified'
   number_of_contacts.times do |i|
-    #puts i
+    # puts i
     current_contact_index = (12 + i * contact_size)
     node = {
         id: bytes[current_contact_index, 16].unpack('C*'),
-        ip: bytes[current_contact_index+16, 4].unpack('N').first,
+        ip: bytes[current_contact_index+16, 4].unpack('V').first,
         udp_port: bytes[current_contact_index+20, 2].unpack('v').first,
         tcp_port: bytes[current_contact_index+22, 2].unpack('v').first,
         version:  bytes[current_contact_index+24, 1].unpack('C').first,
@@ -419,38 +455,58 @@ def parse_nodes_dat(bytes)
         verified: bytes[current_contact_index+33, 1].unpack('C').first
     }
     nodes << node
-    puts node_to_s node, i if i < 10
+    puts node_to_s node, i if i < 1000
   end
   raise 'file size error' unless number_of_contacts*contact_size+12 == bytes.size
   nodes
 end
 
-UDP_PORT = 46720
-TCP_PORT = 46620
-# open (ARGV[0] || 'nodes.dat'), 'rb' do |f|
-#   @nodes = parse_nodes_dat f.read
-# end
-@nodes = [
-    {
-        id: 'a5 21 f3 2d 63 9f a8 56 56 c6 3e c1 09 55 0f d6'.split.map {|x| x.to_i(16)} ,
-        ip: ip_from_s(KadClient.get_local_ip),
-        udp_port: 4672,
-        tcp_port: 4662,
-        version: 8,
-        kad_udp_key: [0]*8,
-        verified: 1
-    }
-]
-UDP_VERIFY_KEY[KadClient.get_local_ip + ':4672'] = [0x4656f255].pack('V').bytes
+UDP_PORT = 4673
+TCP_PORT = 4663
+open (ARGV[0] || 'nodes.dat'), 'rb' do |f|
+  @nodes = parse_nodes_dat f.read
+end
 
-kad_client = KadClient.new(@nodes, UDP_PORT, TCP_PORT)
+kad_client = KadClient.new([], UDP_PORT, TCP_PORT)
 # kad_client.bootstrap
 #kad_client.icmp_ping_nodes
+main = {
+    id: 'a5 21 f3 2d 63 9f a8 56 56 c6 3e c1 09 55 0f d6'.split.map {|x| x.to_i(16)} ,
+    ip: ip_from_s(KadClient.get_local_ip),
+    udp_port: 4672,
+    tcp_port: 4662,
+    version: 8,
+    kad_udp_key: [0]*8,
+    verified: 1
+}
+main2 = {
+    id: '02 ae ee 01 e0 2a c6 05 a1 0b ce c8 90 20 d0 67'.split.map {|x| x.to_i(16)},
+    ip: ip_from_s('192.168.199.5'),
+    udp_port: 4672,
+    tcp_port: 4662,
+    version: 8,
+    kad_udp_key: [0].pack('V').unpack('C*'),
+    verified: 1
+}
+main1 = {
+    id: '2f 3f b3 d6 83 af cf 43 25 eb 71 1b b3 70 f7 42'.split.map {|x| x.to_i(16)} ,
+    ip: ip_from_s('53.189.61.188'),
+    udp_port: 4672,
+    tcp_port: 4662,
+    version: 8,
+    kad_udp_key: [0xe4a4219c].pack('V').unpack('C*'),
+    verified: 1
+}
+
+@nodes.each do |node|
+  kad_client.add_contact(node)
+end
 loop do
   # kad_client.hello
   # kad_client.keyword('abc')
-  kad_client.find_node(kad_client.id)
-  sleep 100000#0.2
+  # kad_client.add_contact(main2)
+  kad_client.bootstrap_from_contacts
+  sleep 10#0.2
 end
 
 kad_client.join
