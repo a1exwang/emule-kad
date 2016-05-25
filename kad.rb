@@ -4,6 +4,7 @@ require 'digest/md5'
 require 'openssl'
 require 'pp'
 require 'json'
+require_relative 'utils'
 
 LOCAL_KAD_UDP_KEY = 0x22334455
 def get_udp_verify_key(ip)
@@ -84,7 +85,7 @@ class KadPacket
 
       key = kad_id.pack('C*') + [salt].pack('v')
       receiver_verify_key = 0
-      sender_verify_key = get_udp_verify_key(ip)
+      sender_verify_key = get_udp_verify_key(ip.to_i)
 
       # puts 'packet: ' + packet.unpack('C*').map {|x| x.to_s(16)}.join(' ')
       to_enc = [KadPacket::MAGIC_VALUE_UDP_SYNC_CLIENT,
@@ -170,8 +171,8 @@ class KadPacket
     #   +14 uint8[16]   sender_id(+self_id+)
     def self.kad2_req(max_required, ip, contact_id, target_id, version)
       kad_packet = (kad_header(:kad2_req) +
-          [max_required, *target_id, *contact_id]).pack('C*')
-      check_and_encrypt(ip, contact_id, kad_packet, version)
+          [max_required, *target_id, *contact_id.array]).pack('C*')
+      check_and_encrypt(ip, contact_id.array, kad_packet, version)
     end
 
     ##
@@ -219,13 +220,17 @@ class KadPacket
         count = @bytes[0x10]
         contacts = []
         def parse_contact(bytes)
-          {
-              id: bytes[0, 16],
-              ip: bytes[16, 4].pack('C*').unpack('V').first,
-              udp_port: bytes[20] + bytes[21] << 8,
-              tcp_port: bytes[22] + bytes[23] << 8,
-              version: bytes[24]
-          }
+          begin
+            {
+                id: Kademlia::Utils::KadID.new(bytes[0, 16]),
+                ip: Kademlia::Utils::IPAddress.from_uint32_be_byte_array(bytes[16, 4]),
+                udp_port: bytes[20] + (bytes[21] << 8),
+                tcp_port: bytes[22] + (bytes[23] << 8),
+                version: bytes[24]
+            }
+          rescue Exception => e
+            puts e
+          end
         end
         count.times do |i|
           contacts << parse_contact(@bytes[0x11 + 25 * i, 25])
@@ -262,6 +267,10 @@ end
 MY_FILE_NAME = 'kad.json'
 class KadClient
   attr_reader :tcp_port, :udp_port, :mtu, :id
+
+  ##
+  # add_contact(contact)
+  # @param: contact, contact object or contact array
   def add_contact(contact)
     @contacts.each do |c|
       if c[:id] == contact[:id] || @id == contact[:id]
@@ -389,8 +398,8 @@ class KadClient
     contacts.each do |node|
       begin
         @udp_socket.send(KadPacket::Helpers.kad2_req(0xb, node[:ip], node[:id], kad_id, node[:version]),
-                         0, ip_to_s(node[:ip]), node[:udp_port])
-        puts "find node id '#{kad_id}' to #{ip_to_s node[:ip]}:#{node[:udp_port]}"
+                         0, node[:ip].to_s, node[:udp_port])
+        puts "find node id '#{kad_id}' to #{node[:ip]}:#{node[:udp_port]}"
       rescue Errno::EINVAL => e
         puts e
       end
@@ -433,46 +442,16 @@ def node_to_s(node, i)
           node[:id].map {|x| '%02x' % x }.join(' ')
 end
 
-def parse_nodes_dat(bytes)
-  raise 'magic error' unless 0 == bytes[0...4].unpack('V').first
-  version = bytes[4...8].unpack('V').first
-  raise "nodes.dat version error: version: #{version}" if version != 2 && version != 3
-  number_of_contacts = bytes[8...12].unpack('V').first
-  # puts version: version, n: number_of_contacts
-  nodes = []
-  contact_size = 34
-  # puts ' idx Ver IP address       udp   tcp  kadUDPKey        verified'
-  number_of_contacts.times do |i|
-    # puts i
-    current_contact_index = (12 + i * contact_size)
-    node = {
-        id: bytes[current_contact_index, 16].unpack('C*'),
-        ip: bytes[current_contact_index+16, 4].unpack('V').first,
-        udp_port: bytes[current_contact_index+20, 2].unpack('v').first,
-        tcp_port: bytes[current_contact_index+22, 2].unpack('v').first,
-        version:  bytes[current_contact_index+24, 1].unpack('C').first,
-        kad_udp_key: bytes[current_contact_index+25,8].unpack('C*'),
-        verified: bytes[current_contact_index+33, 1].unpack('C').first
-    }
-    nodes << node
-    puts node_to_s node, i if i < 1000
-  end
-  raise 'file size error' unless number_of_contacts*contact_size+12 == bytes.size
-  nodes
-end
+UDP_PORT = 46720
+TCP_PORT = 46620
 
-UDP_PORT = 4673
-TCP_PORT = 4663
-open (ARGV[0] || 'nodes.dat'), 'rb' do |f|
-  @nodes = parse_nodes_dat f.read
-end
 
 kad_client = KadClient.new([], UDP_PORT, TCP_PORT)
-# kad_client.bootstrap
-#kad_client.icmp_ping_nodes
+
+@nodes = Kademlia::Utils::Helpers.parse_nodes_dat('nodes.dat')
 main = {
-    id: 'a5 21 f3 2d 63 9f a8 56 56 c6 3e c1 09 55 0f d6'.split.map {|x| x.to_i(16)} ,
-    ip: ip_from_s(KadClient.get_local_ip),
+    id: Kademlia::Utils::KadID.new('a5 21 f3 2d 63 9f a8 56 56 c6 3e c1 09 55 0f d6'.split.map {|x| x.to_i(16)}) ,
+    ip: Kademlia::Utils::IPAddress.new(KadClient.get_local_ip),
     udp_port: 4672,
     tcp_port: 4662,
     version: 8,
@@ -480,59 +459,25 @@ main = {
     verified: 1
 }
 main2 = {
-    id: '02 ae ee 01 e0 2a c6 05 a1 0b ce c8 90 20 d0 67'.split.map {|x| x.to_i(16)},
-    ip: ip_from_s('192.168.199.5'),
+    id: Kademlia::Utils::KadID.new('02 ae ee 01 e0 2a c6 05 a1 0b ce c8 90 20 d0 67'.split.map {|x| x.to_i(16)}),
+    ip: Kademlia::Utils::IPAddress.new('183.172.144.75'),
     udp_port: 4672,
     tcp_port: 4662,
     version: 8,
     kad_udp_key: [0].pack('V').unpack('C*'),
     verified: 1
 }
-main1 = {
-    id: '2f 3f b3 d6 83 af cf 43 25 eb 71 1b b3 70 f7 42'.split.map {|x| x.to_i(16)} ,
-    ip: ip_from_s('53.189.61.188'),
-    udp_port: 4672,
-    tcp_port: 4662,
-    version: 8,
-    kad_udp_key: [0xe4a4219c].pack('V').unpack('C*'),
-    verified: 1
-}
 
-@nodes.each do |node|
-  kad_client.add_contact(node)
-end
+# @nodes.each do |node|
+#   kad_client.add_contact(node)
+# end
+kad_client.add_contact(main2)
 loop do
   # kad_client.hello
   # kad_client.keyword('abc')
   # kad_client.add_contact(main2)
   kad_client.bootstrap_from_contacts
-  sleep 10#0.2
+  sleep 5#0.2
 end
 
 kad_client.join
-
-# packet = []
-# lines = File.read('enc.txt').split("\n")
-# lines.each do |line|
-#   packet += line.split[1..-1].map { |x| x.to_i(16) }
-# end
-#
-# dec = KadPacket::Helpers::decrypt_packet(
-#     [27,105,244,174].pack('C*').unpack('V').first,
-#     'a5 21 f3 2d 63 9f a8 56 56 c6 3e c1 09 55 0f d6'.split(' ').map{|x|x.to_i(16)},
-#     packet
-# )
-# (dec.size / 16 + 1).times do |i|
-#   puts dec[16*i, 16].map{|x| '%02x' % x }.join(' ')
-# end
-#
-# enc = KadPacket::Helpers::encrypt_packet(
-#     0x3f03,
-#     [27,105,244,174].pack('C*').unpack('V').first,
-#     'a5 21 f3 2d 63 9f a8 56 56 c6 3e c1 09 55 0f d6'.split(' ').map{|x|x.to_i(16)},
-#     dec.pack('C*')
-# )
-# puts 'enc:'
-# (enc.size / 16 + 1).times do |i|
-#   puts enc[16*i, 16].bytes.map{|x| '%02x' % x }.join(' ')
-# end
