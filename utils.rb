@@ -62,6 +62,7 @@ module Kademlia
       #     end
       #     handler.on(name, lambda) do |m|
       #     end
+      # message_handler = { name: 'a', filter: , handler:, ... }
       def initialize(&block)
         @queue = Queue.new
         obj = MyObject.new
@@ -69,7 +70,6 @@ module Kademlia
         @handlers = obj.message_handlers
       end
 
-      # message = { name: 'a', filter: , handler:, ... }
       def <<(message)
         @queue << message
       end
@@ -87,9 +87,9 @@ module Kademlia
                 break
               end
             end
-            raise UnHandledMessageError, "message #{message}" unless handled
+            raise Error::UnHandledMessageError, "message #{message}" unless handled
           else
-            raise UnknownMessageError, "message name: #{name}"
+            raise Error::UnknownMessageError, "message name: #{name}"
           end
         end
       end
@@ -100,8 +100,8 @@ module Kademlia
         def initialize
           @message_handlers = Hash.new { Array.new }
         end
-        def on(name, lambda, &block)
-          @message_handlers[name] << { filter: lambda, handler: block }
+        def on(name, lambda = nil, &block)
+          @message_handlers[name] += [{ filter: lambda, handler: block }]
         end
         def method_missing(name, *params, &block)
           if name.to_s =~ /on_(.+)$/
@@ -159,6 +159,9 @@ module Kademlia
     class IPAddress
       attr_reader :str
 
+      ##
+      # initialize with IPv4 string
+      # @param: str string like '1.1.1.1'
       def initialize(str)
         @str = str
         if str.is_a?(String)
@@ -213,11 +216,15 @@ module Kademlia
       end
 
       def ==(other)
-        self.array == other.array
+        if other.is_a?(KadID)
+          self.array == other.array
+        else
+          false
+        end
       end
 
       def to_s
-        @array.map { |x| '%02x ' % x }.join(' ')
+        @array.map { |x| '%02x' % x }.join(' ')
       end
     end
 
