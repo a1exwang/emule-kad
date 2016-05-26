@@ -75,18 +75,18 @@ class KadPacket
       end
       salt = packet[1..2]
       key = key_part + salt
-      puts "dec key: #{key.map{|x|x.to_s(16)}.join(' ')}"
+      LOG.logt 'decrypt_packet', "dec key = #{key.map{|x|x.to_s(16)}.join(' ')}"
       md5_key = Digest::MD5.digest(key.pack('C*'))
       dec_packet = RC4.new(md5_key).decrypt(packet[3..-1].pack('C*'))
       magic = dec_packet[0, 4].unpack('V').first
-      printf "decrypt_packet: magic = %08x\n", magic
+      LOG.logt 'decrypt_packet', "magic = %08x\n" % magic
       if magic != Kademlia::Constants::MAGIC_VALUE_UDP_SYNC_CLIENT
         raise 'wrong magic'
       end
       _sender_verify = dec_packet[4, 4].unpack('V').first
       _receiver_verify = dec_packet[8, 4].unpack('V').first
       _padding = dec_packet[12].unpack('C').first
-      puts 'sender verify: %08x, receiver verify: %08x, padding: %d' % [_sender_verify, _receiver_verify, _padding]
+      LOG.logt 'decrypt_packet', "sender verify: %08x\nreceiver verify: %08x\npadding: %d" % [_sender_verify, _receiver_verify, _padding]
       dec_packet[13..-1].bytes
     end
 
@@ -162,7 +162,7 @@ class KadPacket
     raw_str = str
     protocol, opc = str[0..1].unpack('C2')
     if protocol != Kademlia::Constants::KAD_PROTOCOL
-      puts protocol
+      # puts protocol
       str = Helpers.decrypt_packet(ip, id, raw_str.bytes, remote_ip, remote_port).pack('C*')
       protocol, opc = str[0..1].unpack('C2')
 
@@ -177,11 +177,11 @@ class KadPacket
       when :kad2_bootstrap_res
       when :kad2_hello_res
         hello_res = parse_hello_res(@bytes)
-        puts hello_res
+        # puts hello_res
       when :kad2_req
-        puts 'kad2_req'
+        # puts 'kad2_req'
       when :kad2_res
-        puts "kad2_res from #{ip}"
+        # puts "kad2_res from #{ip}"
         count = @bytes[0x10]
         contacts = []
         def parse_contact(bytes)
@@ -250,9 +250,30 @@ class KadClient
       end
     end
     if @id == nil
-      @id = Array.new(16) { Random.rand(0...(1 << 8)) }
-      json = { kad: { id: @id } }
+      @id = Kademlia::Utils::KadID.new(Array.new(16) { Random.rand(0...(1 << 8)) })
+      LOG.logt('KadClient', "KadID generated: #{@id}")
+      json = { kad: { id: @id.array } }
       File.write(MY_FILE_NAME, json.to_json)
+    end
+  end
+
+  def init_udp
+    @udp_socket = UDPSocket.new
+    @udp_socket.bind(@ip, udp_port)
+    _, @udp_port, _, _ = @udp_socket.addr
+    @udp_thread = Thread.new do
+      loop do
+        data, addr = @udp_socket.recvfrom(@mtu)
+        _, remote_port, _, remote_ip = addr
+
+        begin
+          packet = KadPacket.new(self, data, @ip, @id, remote_ip, remote_port)
+        rescue Kademlia::Error::InvalidKadPacket => e
+          puts e
+        end
+
+        LOG.logt 'UDP thread', "received from #{addr[2]}:#{addr[1]}, kad opcode '#{packet.opcode}'"
+      end
     end
   end
 
@@ -261,24 +282,7 @@ class KadClient
     @ip = KadClient.get_local_ip
     @contacts = []
     @mtu = mtu
-
-    @udp_socket = UDPSocket.new
-    @udp_socket.bind(@ip, udp_port)
-    _, @udp_port, _, _ = @udp_socket.addr
-    @udp_thread = Thread.new do
-      loop do
-        data, addr = @udp_socket.recvfrom(@mtu)
-        _, remote_port, _, remote_ip = addr
-        #begin
-          packet = KadPacket.new(self, data, @ip, @id, remote_ip, remote_port)
-        #rescue Exception => e
-        #  puts e
-        #  raise e
-        #end
-
-        LOG.logt 'UDP thread', "received from #{addr[2]}:#{addr[1]} #{packet.size} bytes"
-      end
-    end
+    init_udp
   end
 
   def bootstrap_from_contacts

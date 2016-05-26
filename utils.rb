@@ -1,3 +1,5 @@
+require 'time'
+
 module Kademlia
   module Error
     InvalidKadPacket = Class.new Exception
@@ -113,33 +115,44 @@ module Kademlia
     end
 
     class Logger
+      TAG_MAX_WIDTH = 16
       def initialize(target = nil, attr = 'w')
         if target.is_a?(String)
           @stream = File.open(target, attr)
         else
           @stream = STDOUT
         end
+        level_map = {
+            verbose: 'V',
+            normal:  'N',
+            debug:   'D'
+        }
         # this is default formatter
-        set_format do |str, level|
+        set_format do |tag, str, indent, level|
           lines = str.split("\n")
-          lines.each do |line|
-            '%s %s %s' %
-                [level.to_s, Time.now.strftime('%H:%M:%S.%6N'), line]
+          result = ''
+          lines.each_with_index do |line, index|
+            # -V timestamp tag indent*' ' str
+            result += "-%s %s %-#{TAG_MAX_WIDTH}s%-#{indent+4 + (index == 0 ? 0 : 2)}s%s\n" %
+                [level_map[level],
+                 Time.now.strftime('%H:%M:%S.%6N'),
+                 tag[0, TAG_MAX_WIDTH],
+                 '', # indent
+                 line]
           end
+          result
         end
       end
       def set_format(&block)
         raise ArgumentError unless block
         @formatter = block
       end
-      def log(str, level = 'verbose'.to_sym)
-        str = @formatter.call(str, level)
-        @stream.write(str)
-        @stream.flush
+      def log(str, indent = 0, level = 'verbose'.to_sym)
+        logt('', str, indent, level)
       end
-      def logt(tag, str, level = 'verbose'.to_sym)
-        str = @formatter.call(str, level)
-        @stream.write("#{tag} #{str}")
+      def logt(tag, str, indent = 0, level = 'verbose'.to_sym)
+        str = @formatter.call(tag, str, indent, level)
+        @stream.write(str)
         @stream.flush
       end
     end
