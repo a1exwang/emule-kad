@@ -1,5 +1,148 @@
 module Kademlia
+  module Error
+    InvalidKadPacket = Class.new Exception
+
+  end
+  module Constants
+    KAD_VERSION_MIN_ENCRYPTION = 6
+    MAGIC_VALUE_UDP_SYNC_CLIENT = 0x395F2EC1
+
+    module SearchType
+      NODE = 0
+      NODE_COMPLETE = 1
+      FILE = 2
+      KEYWORD = 3
+      NOTES = 4
+    end
+
+    KAD_PROTOCOL = 0xe4
+    OPCODE_NAME = {
+        0x01 => :kad2_bootstrap_req,
+        0x09 => :kad2_bootstrap_res,
+        0x11 => :kad2_hello_req,
+        0x19 => :kad2_hello_res,
+        0x21 => :kad2_req,
+        0x22 => :kad2_hello_res_ack,
+        0x29 => :kad2_res,
+        0x33 => :kad2_search_key_req,
+        0x34 => :kad2_search_source_req,
+        0x35 => :kad2_search_notes_req,
+        0x3b => :kad2_search_res,
+        0x43 => :kad2_publish_key_req,
+        0x44 => :kad2_publish_source_req,
+        0x45 => :kad2_publish_notes_req,
+        0x4b => :kad2_publish_res,
+        0x4c => :kad2_publish_res_ack,
+        0x53 => :kad_firewalled2_req,
+        0x60 => :kad2_ping,
+        0x61 => :kad2_pong,
+        0x62 => :kad2_firewall_udp
+    }
+    GET_OPCODE = OPCODE_NAME.invert
+  end
   module Utils
+    class MessageQueue
+      module Error
+        UnknownMessageError = Class.new(Exception)
+        UnHandledMessageError = Class.new(Exception)
+      end
+      ##
+      # create a message queue and set handlers with block
+      # @param block
+      #
+      # examples:
+      #   MessageQueue.new do |handler|
+      #     handler.on_req(lambda) do |m|
+      #       # do something
+      #     end
+      #     handler.on(name) do |m|
+      #       # do something
+      #     end
+      #     handler.on(name, lambda) do |m|
+      #     end
+      def initialize(&block)
+        @queue = Queue.new
+        obj = MyObject.new
+        block.call(obj)
+        @handlers = obj.message_handlers
+      end
+
+      # message = { name: 'a', filter: , handler:, ... }
+      def <<(message)
+        @queue << message
+      end
+
+      def start_blocking
+        loop do
+          message = @queue.pop
+          name = message[:name]
+          if @handlers[name]
+            handled = false
+            @handlers[name].each do |handler|
+              if !handler[:filter] || handler[:filter].call(message)
+                handler[:handler].call(message)
+                handled = true
+                break
+              end
+            end
+            raise UnHandledMessageError, "message #{message}" unless handled
+          else
+            raise UnknownMessageError, "message name: #{name}"
+          end
+        end
+      end
+
+      private
+      class MyObject
+        attr_reader :message_handlers
+        def initialize
+          @message_handlers = Hash.new { Array.new }
+        end
+        def on(name, lambda, &block)
+          @message_handlers[name] << { filter: lambda, handler: block }
+        end
+        def method_missing(name, *params, &block)
+          if name.to_s =~ /on_(.+)$/
+            message_name = $1
+            on(message_name, *params, &block)
+          else
+            super
+          end
+        end
+      end
+    end
+
+    class Logger
+      def initialize(target = nil, attr = 'w')
+        if target.is_a?(String)
+          @stream = File.open(target, attr)
+        else
+          @stream = STDOUT
+        end
+        # this is default formatter
+        set_format do |str, level|
+          lines = str.split("\n")
+          lines.each do |line|
+            '%s %s %s' %
+                [level.to_s, Time.now.strftime('%H:%M:%S.%6N'), line]
+          end
+        end
+      end
+      def set_format(&block)
+        raise ArgumentError unless block
+        @formatter = block
+      end
+      def log(str, level = 'verbose'.to_sym)
+        str = @formatter.call(str, level)
+        @stream.write(str)
+        @stream.flush
+      end
+      def logt(tag, str, level = 'verbose'.to_sym)
+        str = @formatter.call(str, level)
+        @stream.write("#{tag} #{str}")
+        @stream.flush
+      end
+    end
     class IPAddress
       attr_reader :str
 
@@ -77,6 +220,23 @@ module Kademlia
       end
     end
 
+    module BinaryBuilder
+      class MyObject
+        @fields = []
+      end
+      def at(offset, type, name, value, &block)
+
+      end
+      def self.build
+
+      end
+
+      private
+      def self.build_array(offset, element_type, element_count)
+
+      end
+    end
+
     module BinaryParser
 
       class MyObject
@@ -89,6 +249,29 @@ module Kademlia
         end
       end
 
+      ##
+      # parse a binary file or bytes
+      # @param data: file name or byte array
+      # @param block: binary format
+      #
+      # examples
+      #   parse do |field|
+      #     field.at offset, type, name, constraints
+      #     field.at offset, :struct, name, constraints do |inner_field|
+      #       inner_field.at relative_offset, type, name, constraints
+      #     end
+      #     field.at offset, [:array, 100, :struct], name, constraints do |inner_field|
+      #       inner_field.at relative_offset, type, name, constraints
+      #     end
+      #     field.at offset, [:array, :previous_integer_name, :uint8], name, constraints
+      #
+      #   +type+ can be
+      #     uint8, uint16, uint32, default to little-endian
+      #     struct, [:array, size, type]
+      #
+      #   +constraints+ can be
+      #     :map, use the block to map the value into another one
+      #     [1,2], the value must be in these values
       def self.parse(data, &block)
         if data.is_a?(String)
           bytes = File.read(data).bytes

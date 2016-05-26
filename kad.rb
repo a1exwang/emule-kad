@@ -11,47 +11,9 @@ def get_udp_verify_key(ip)
   Digest::MD5.digest([ip, LOCAL_KAD_UDP_KEY].pack('VV')).unpack('VVVV').reduce(&:^) % 0xFFFFFFFE + 1
 end
 
-UDP_VERIFY_KEY = {}
-def find_udp_verify_key(ip, port)
-  UDP_VERIFY_KEY["#{ip}:#{port}"]
-end
+LOG = Kademlia::Utils::Logger.new
 
 class KadPacket
-  KAD_VERSION_NEED_ENCRYPTION = 6
-  MAGIC_VALUE_UDP_SYNC_CLIENT = 0x395F2EC1
-
-  module SearchType
-    NODE = 0
-    NODE_COMPLETE = 1
-    FILE = 2
-    KEYWORD = 3
-    NOTES = 4
-  end
-
-  KAD_PROTOCOL = 0xe4
-  OPCODE_NAME = {
-      0x01 => :kad2_bootstrap_req,
-      0x09 => :kad2_bootstrap_res,
-      0x11 => :kad2_hello_req,
-      0x19 => :kad2_hello_res,
-      0x21 => :kad2_req,
-      0x22 => :kad2_hello_res_ack,
-      0x29 => :kad2_res,
-      0x33 => :kad2_search_key_req,
-      0x34 => :kad2_search_source_req,
-      0x35 => :kad2_search_notes_req,
-      0x3b => :kad2_search_res,
-      0x43 => :kad2_publish_key_req,
-      0x44 => :kad2_publish_source_req,
-      0x45 => :kad2_publish_notes_req,
-      0x4b => :kad2_publish_res,
-      0x4c => :kad2_publish_res_ack,
-      0x53 => :kad_firewalled2_req,
-      0x60 => :kad2_ping,
-      0x61 => :kad2_pong,
-      0x62 => :kad2_firewall_udp
-  }
-  GET_OPCODE = OPCODE_NAME.invert
 
   ##
   # This module contains helper methods for encrypt and decrypt packets
@@ -88,7 +50,7 @@ class KadPacket
       sender_verify_key = get_udp_verify_key(ip.to_i)
 
       # puts 'packet: ' + packet.unpack('C*').map {|x| x.to_s(16)}.join(' ')
-      to_enc = [KadPacket::MAGIC_VALUE_UDP_SYNC_CLIENT,
+      to_enc = [Kademlia::Constants::MAGIC_VALUE_UDP_SYNC_CLIENT,
                 0,
                 receiver_verify_key,
                 sender_verify_key].pack('VCVV') + raw_packet
@@ -118,7 +80,7 @@ class KadPacket
       dec_packet = RC4.new(md5_key).decrypt(packet[3..-1].pack('C*'))
       magic = dec_packet[0, 4].unpack('V').first
       printf "decrypt_packet: magic = %08x\n", magic
-      if magic != KadPacket::MAGIC_VALUE_UDP_SYNC_CLIENT
+      if magic != Kademlia::Constants::MAGIC_VALUE_UDP_SYNC_CLIENT
         raise 'wrong magic'
       end
       _sender_verify = dec_packet[4, 4].unpack('V').first
@@ -129,7 +91,7 @@ class KadPacket
     end
 
     def self.check_and_encrypt(ip, kad_id, raw_packet, version)
-      return raw_packet if version < KadPacket::KAD_VERSION_NEED_ENCRYPTION
+      return raw_packet if version < Kademlia::Constants::KAD_VERSION_MIN_ENCRYPTION
 
       # Random.rand(0..65535)
       self.encrypt_packet(0, ip, kad_id, raw_packet)
@@ -190,23 +152,26 @@ class KadPacket
     #   +00 uint8 0xe4
     #   +01 uint8 opcode
     def self.kad_header(opcode_name)
-      [KadPacket::KAD_PROTOCOL, KadPacket::GET_OPCODE[opcode_name]]
+      [Kademlia::Constants::KAD_PROTOCOL, Kademlia::Constants::GET_OPCODE[opcode_name]]
     end
   end
+
+  attr_reader :opcode, :packet, :bytes
 
   def initialize(kad_client, str, ip, id, remote_ip, remote_port)
     raw_str = str
     protocol, opc = str[0..1].unpack('C2')
-    if protocol != KAD_PROTOCOL
+    if protocol != Kademlia::Constants::KAD_PROTOCOL
       puts protocol
       str = Helpers.decrypt_packet(ip, id, raw_str.bytes, remote_ip, remote_port).pack('C*')
       protocol, opc = str[0..1].unpack('C2')
 
-      raise "unknown protocol #{protocol}" unless protocol == KAD_PROTOCOL
+      raise Kademlia::Error::InvalidKadPacket, "unknown protocol #{protocol}" unless
+          protocol == Kademlia::Constants::KAD_PROTOCOL
     end
 
-    @opcode = OPCODE_NAME[opc]
-    raise "Unknown opcode #{@opcode}" unless @opcode
+    @opcode = Kademlia::Constants::OPCODE_NAME[opc]
+    raise Kademlia::Error::InvalidKadPacket, "Unknown opcode #{@opcode}" unless @opcode
     @bytes = str[2..-1].unpack('C*')
     case @opcode
       when :kad2_bootstrap_res
@@ -235,15 +200,11 @@ class KadPacket
         count.times do |i|
           contacts << parse_contact(@bytes[0x11 + 25 * i, 25])
         end
-        result = {
+        @packet = {
+            target_id: Kademlia::Utils::KadID.new(@bytes[0, 0x10]),
             count: count,
             contacts: contacts
         }
-        contacts.each do |contact|
-          kad_client.add_contact(contact)
-        end
-        pp "got #{contacts.size} results"
-        result
       else
     end
   end
@@ -279,9 +240,8 @@ class KadClient
     end
     @contacts << contact
   end
-  def initialize(nodes, udp_port, tcp_port, mtu = 1500)
-    @ip = KadClient.get_local_ip
 
+  def init_my_kad_id
     if File.exists?(MY_FILE_NAME) && (content = File.read(MY_FILE_NAME)).size > 0
       begin
         @id = JSON.parse(content)['kad']['id']
@@ -294,30 +254,20 @@ class KadClient
       json = { kad: { id: @id } }
       File.write(MY_FILE_NAME, json.to_json)
     end
+  end
 
-    def @id.to_s
-      self.map { |x| sprintf '%02x', x }.join('')
-    end
+  def initialize(udp_port, mtu = 1500)
+    init_my_kad_id
+    @ip = KadClient.get_local_ip
     @contacts = []
-    @nodes = nodes
     @mtu = mtu
-    # @tcp_server = TCPServer.new(@ip, tcp_port)
-    # _, @tcp_port, _, _ = @tcp_server.addr
-    # @tcp_thread = Thread.new do
-    #   loop do
-    #     client = @tcp_server.accept
-    #     _data, addr = client.recvfrom
-    #     puts "tcp: from #{addr[2]}:#{addr[1]}"
-    #     client.close
-    #   end
-    # end
 
     @udp_socket = UDPSocket.new
     @udp_socket.bind(@ip, udp_port)
     _, @udp_port, _, _ = @udp_socket.addr
     @udp_thread = Thread.new do
       loop do
-        data, addr = @udp_socket.recvfrom(1500)
+        data, addr = @udp_socket.recvfrom(@mtu)
         _, remote_port, _, remote_ip = addr
         #begin
           packet = KadPacket.new(self, data, @ip, @id, remote_ip, remote_port)
@@ -326,7 +276,7 @@ class KadClient
         #  raise e
         #end
 
-        puts "#{addr[2]}:#{addr[1]}, packet: #{packet.to_s}"
+        LOG.logt 'UDP thread', "received from #{addr[2]}:#{addr[1]} #{packet.size} bytes"
       end
     end
   end
@@ -335,12 +285,12 @@ class KadClient
     find_node(@contacts, @id)
   end
 
-  def test_nodes
-    @nodes.each do |node|
-      `nc -w 5 -uvz #{ip_to_s node[:ip]} #{node[:udp_port]}`
-      puts $!
-    end
-  end
+  # def test_nodes
+  #   @nodes.each do |node|
+  #     `nc -w 5 -uvz #{ip_to_s node[:ip]} #{node[:udp_port]}`
+  #     puts $!
+  #   end
+  # end
   ##
   # get global ip address at local machine
   # return value: String. e.g. '1.1.1.1'
@@ -359,40 +309,20 @@ class KadClient
   # Wait for the kad client listeners
   def join
     @udp_thread.join
-    @tcp_thread.join if @tcp_thread
+    #@tcp_thread.join if @tcp_thread
   end
 
-  def bootstrap
-    @nodes.each do |node|
-      @udp_socket.send KadPacket::Helpers.kad2_bootstrap_req(@id, @tcp_port, node[:ip], node[:id], node[:version]),
-                       0, ip_to_s(node[:ip]), node[:udp_port]
-    end
-  end
-
-  def hello
-    @nodes.each do |node|
-      begin
-        @udp_socket.send KadPacket::Helpers.kad2_hello_req(@id, @tcp_port, node[:ip], node[:id], node[:version]),
-                         0, ip_to_s(node[:ip]), node[:udp_port]
-        puts "hello to #{ip_to_s node[:ip]}:#{node[:udp_port]}"
-      rescue Exception => e
-        puts e
-        raise e
-      end
-    end
-  end
-
-  def keyword(w)
-    @nodes.each do |node|
-      begin
-      @udp_socket.send(KadPacket::Helpers.kad2_keyword_req(node[:ip], node[:id], node[:version], w),
-                       0, ip_to_s(node[:ip]), node[:udp_port])
-      puts "keyword '#{w}' to #{ip_to_s node[:ip]}:#{node[:udp_port]}"
-      rescue Exception => e
-        puts e
-      end
-    end
-  end
+  # def keyword(w)
+  #   @nodes.each do |node|
+  #     begin
+  #     @udp_socket.send(KadPacket::Helpers.kad2_keyword_req(node[:ip], node[:id], node[:version], w),
+  #                      0, ip_to_s(node[:ip]), node[:udp_port])
+  #     puts "keyword '#{w}' to #{ip_to_s node[:ip]}:#{node[:udp_port]}"
+  #     rescue Exception => e
+  #       puts e
+  #     end
+  #   end
+  # end
 
   def find_node(contacts, kad_id)
     contacts.each do |node|
@@ -402,19 +332,6 @@ class KadClient
         puts "find node id '#{kad_id}' to #{node[:ip]}:#{node[:udp_port]}"
       rescue Errno::EINVAL => e
         puts e
-      end
-    end
-  end
-
-  def ping
-    @nodes.each do |node|
-      begin
-        @udp_socket.send KadPacket::Helpers.kad_ping(@id, @tcp_port, node[:version]),
-                         0, ip_to_s(node[:ip]), node[:udp_port]
-        puts "hello to #{ip_to_s node[:ip]}:#{node[:udp_port]}"
-      rescue Exception => e
-        puts e
-        raise e
       end
     end
   end
@@ -429,24 +346,11 @@ def ip_from_s(str)
   (ip0 << 24) + (ip1 << 16) + (ip2 << 8) + ip3
 end
 
-def node_to_s(node, i)
-
-  sprintf "  %d   %d  %-15s %5d %5d %s %s    %s\n",
-          i,
-          node[:version],
-          ip_to_s(node[:ip]),
-          node[:udp_port],
-          node[:tcp_port],
-          node[:kad_udp_key].map {|x| sprintf '%02x', x}.join(''),
-          node[:verified],
-          node[:id].map {|x| '%02x' % x }.join(' ')
-end
-
 UDP_PORT = 46720
 TCP_PORT = 46620
 
 
-kad_client = KadClient.new([], UDP_PORT, TCP_PORT)
+kad_client = KadClient.new(UDP_PORT)
 
 @nodes = Kademlia::Utils::Helpers.parse_nodes_dat('nodes.dat')
 main = {
@@ -464,7 +368,7 @@ main2 = {
     udp_port: 4672,
     tcp_port: 4662,
     version: 8,
-    kad_udp_key: [0].pack('V').unpack('C*'),
+    kad_udp_key: [0]*8,
     verified: 1
 }
 
@@ -473,11 +377,8 @@ main2 = {
 end
 kad_client.add_contact(main2)
 loop do
-  # kad_client.hello
-  # kad_client.keyword('abc')
-  # kad_client.add_contact(main2)
   kad_client.bootstrap_from_contacts
-  sleep 5#0.2
+  sleep 5
 end
 
 kad_client.join
