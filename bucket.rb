@@ -7,7 +7,7 @@ module Kademlia
   class Bucket
 
     MAX_DEPTH = KadID::BIT_WIDTH
-    BUCKET_SIZE = 5
+    BUCKET_SIZE = 100
     attr_reader :left, :right, :parent
     attr_reader :depth
     attr_reader :contacts
@@ -37,7 +37,7 @@ module Kademlia
     def add_contact(contact)
       # leaf node
       if self.leaf?
-        return if @contacts.include?(contact)
+        # return if @contacts.include?(contact)
         insert_contact(contact)
 
         # leaf node that may become a branch node after insertion
@@ -147,7 +147,7 @@ module Kademlia
 
   end
 end
-
+#
 # def random_kad_id
 #   Kademlia::KadID.new(Array.new(16) { Random.rand(0...(1<<8)) })
 # end
@@ -166,3 +166,4 @@ end
 # y.each do |x|
 #   puts "result, dis: #{(x.id^target).highest_one}, id: #{x.id.to_s_uint128}"
 # end
+# puts "total #{root.contact_count}"

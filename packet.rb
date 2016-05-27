@@ -223,7 +223,9 @@ module Kademlia
           @content = {
               target_id: KadID.from_kad_bytes(@bytes[0, 0x10]),
               count: count,
-              contacts: contacts
+              contacts: contacts,
+              remote_ip: remote_ip,
+              remote_udp_port: remote_port
           }
         when :kad2_search_res
           logt 'UDP thread', '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!kad2_research_res'

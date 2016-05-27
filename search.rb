@@ -16,11 +16,34 @@ module Kademlia
   #   1.自己为第-1代中的唯一元素;
   #   2. 对第i代中的contact发送查询请求, 得到的结果集合为第i+1代
   class NodeIDSearch < Search
+    FIND_NODE_COUNT = 0xb
     def initialize(id, init_contacts)
       super(id)
       @contact_generations = []
       init_contacts.each do |c|
         add_contact(c)
+      end
+    end
+
+    def add_contact_by_parent_id(contact, parent_id)
+      @contact_generations.each_with_index do |g, i|
+        g.each do |c|
+          if c[:contact].id == parent_id
+            add_contact(contact, c)
+            return
+          end
+        end
+      end
+      raise ArgumentError, "parent id '#{parent_id} not found"
+    end
+
+    def log_self
+      @contact_generations.each_with_index do |g, i|
+        LOG.logt('search result', 'generation ' + i.to_s)
+        g.each do |c|
+          contact = c[:contact]
+          LOG.logt('search result', "dis :#{(@id ^ contact.id).highest_one}bits, id :#{contact.id}", 4)
+        end
       end
     end
 
@@ -41,14 +64,23 @@ module Kademlia
       nil
     end
 
-    def get_unsent_contacts
+    ##
+    # get all contacts to whom we have not sent find-node request,
+    #   and mark them 'sent'
+    # this function returns +max+ results that are nearest to target
+    def get_unsent_contacts_and_set_sent(max = FIND_NODE_COUNT)
       ret = []
       @contact_generations.each do |g|
         g.each do |c|
-          ret << c unless c[:sent]
+          unless c[:sent]
+            ret << c
+            c[:sent] = true
+          end
         end
       end
-      ret
+      ret.sort do |x, y|
+        (x[:contact].id ^ @id) <=> (y[:contact].id ^ @id)
+      end.first(max)
     end
 
     def add_contacts(contacts, parent)

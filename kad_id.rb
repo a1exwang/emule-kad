@@ -13,6 +13,7 @@ module Kademlia
         v = @le_bytes[BYTE_WIDTH - 1 - i] <=> other.le_bytes[BYTE_WIDTH - 1 - i]
         return v if v != 0
       end
+      0
     end
 
     ##

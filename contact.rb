@@ -20,10 +20,11 @@ module Kademlia
     def <=>(other)
       if other.is_a?(Contact)
         @id <=> other.id
+      else
+        raise ArgumentError
       end
 
     end
-
 
     def update_responding_time
       @last_respond_at = Time.now

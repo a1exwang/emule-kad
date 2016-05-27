@@ -134,6 +134,10 @@ module Kademlia
         @str
       end
 
+      def ==(other)
+        to_s == other.to_s
+      end
+
       def self.from_uint32_be_byte_array(arr)
         new(arr.map { |x| x.to_s }.join('.'))
       end

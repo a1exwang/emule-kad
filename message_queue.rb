@@ -30,6 +30,14 @@ module Kademlia
       @queue << message
     end
 
+    def send_delay(seconds, message)
+      raise ArgumentError unless seconds.is_a? Numeric
+      Thread.new do
+        sleep seconds
+        self << message
+      end
+    end
+
     def start_blocking
       loop do
         message = @queue.pop
