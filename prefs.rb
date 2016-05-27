@@ -1,4 +1,5 @@
 require 'json'
+
 module Kademlia
   module Utils
     class Prefs
@@ -12,7 +13,7 @@ module Kademlia
           begin
             json = JSON.parse(File.read(@file_path))
             @kad = json['kad']
-            @kad_id = @kad['id'] ? Utils::KadID.new(@kad['id']) : init_my_kad_id
+            @kad_id = @kad['id'] ? KadID.from_kad_bytes(@kad['id']) : init_my_kad_id
             @kad_udp_port = @kad['udp_port']
             @kad_tcp_port = @kad['tcp_port']
             @mtu = json['mtu']
@@ -23,7 +24,7 @@ module Kademlia
       end
 
       def init_my_kad_id
-        kad_id = Kademlia::Utils::KadID.new(Array.new(16) { Random.rand(0...(1 << 8)) })
+        kad_id = Kademlia::KadID.from_kad_bytes(Array.new(16) { Random.rand(0...(1 << 8)) })
         LOG.logt('Prefs', "KadID generated: #{kad_id}")
         kad_id
       end
@@ -34,7 +35,7 @@ module Kademlia
 
       def to_json
         kad = {
-            id: @kad_id.array
+            id: @kad_id.kad_bytes
         }
         {
             kad: kad,

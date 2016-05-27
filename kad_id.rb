@@ -1,0 +1,85 @@
+module Kademlia
+  class KadID
+    BIT_WIDTH = 128
+    BYTE_WIDTH = 16
+    attr_reader :le_bytes
+
+    # the we have >, <, >=, <=, ==...
+    include Comparable
+    def <=>(other)
+      BYTE_WIDTH.times do |i|
+        v = @le_bytes[BYTE_WIDTH - 1 - i] <=> other.le_bytes[BYTE_WIDTH - 1 - i]
+        return v if v != 0
+      end
+    end
+
+    ##
+    # from le array
+    def initialize(arr)
+      if arr.is_a?(Array) && arr.size == 16
+        arr.each do |x|
+          raise ArgumentError, 'invalid uint8 array' unless x >= 0 && x < 256
+        end
+        @le_bytes = arr.dup
+      else
+        raise ArgumentError, 'parameter must be an uint8 array'
+      end
+    end
+
+    def be_bytes
+      @le_bytes.reverse
+    end
+
+    def bit(n)
+      raise ArgumentError unless 0 <= n && n < BIT_WIDTH
+      byte_n = n / 8
+      off = n % 8
+      (@le_bytes[byte_n] >> off) & 1
+    end
+
+    def highest_one
+      (0...BYTE_WIDTH).reverse_each do |i|
+        (0...8).reverse_each do |j|
+          return i*8 + j if @le_bytes[i] & (1 << j) != 0
+        end
+      end
+      -1
+    end
+
+    def kad_bytes
+      @le_bytes.pack('C*').unpack('V4').reverse.pack('V4').bytes
+    end
+
+    def self.from_kad_bytes(arr)
+      KadID.new arr.pack('C*').unpack('V4').reverse.pack('V4').bytes
+    end
+
+    def self.from_md4_bytes(arr)
+      array = arr.dup
+      array.pack('C*').unpack('N4').pack('V4').bytes
+      KadID.from_kad_bytes(array)
+    end
+
+    def equal?(other)
+      (self <=> other) == 0
+    end
+
+    def ^(other)
+      new_arr = []
+      @le_bytes.each_with_index do |b, i|
+        new_arr[i] = @le_bytes[i] ^ other.le_bytes[i]
+      end
+      KadID.new(new_arr)
+    end
+
+    def to_s
+      kad_bytes.map { |x| '%02x' % x }.join(' ')
+    end
+
+    def to_s_uint128
+      be_bytes.map { |x| '%02x' % x }.join(' ')
+    end
+
+  end
+
+end

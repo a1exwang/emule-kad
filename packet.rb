@@ -1,6 +1,7 @@
 require 'rc4'
 require 'digest/md5'
 require 'openssl'
+require 'zlib'
 
 def ip_from_s(str)
   ip0, ip1, ip2, ip3 = str.split('.').map {|x| x.to_i}
@@ -62,8 +63,9 @@ module Kademlia
         rc4 = RC4.new(md5_key)
         enc_data = rc4.encrypt(to_enc)
 
-        [0x0C, salt].pack('Cv') + enc_data
+        ([0x0C, salt].pack('Cv') + enc_data).bytes
       end
+
       ##
       # decrypt packet, similar to encrypt_packet
       def self.decrypt_packet(ip, id, packet, remote_ip, remote_port)
@@ -80,19 +82,28 @@ module Kademlia
         md5_key = Digest::MD5.digest(key.pack('C*'))
         dec_packet = RC4.new(md5_key).decrypt(packet[3..-1].pack('C*'))
         magic = dec_packet[0, 4].unpack('V').first
-        LOG.logt 'decrypt_packet', "magic = %08x\n" % magic
+        # LOG.logt 'decrypt_packet', "magic = %08x\n" % magic
         if magic != Kademlia::Constants::MAGIC_VALUE_UDP_SYNC_CLIENT
           raise 'wrong magic'
         end
         _sender_verify = dec_packet[4, 4].unpack('V').first
         _receiver_verify = dec_packet[8, 4].unpack('V').first
         _padding = dec_packet[12].unpack('C').first
-        LOG.logt 'decrypt_packet', "sender verify: %08x\nreceiver verify: %08x\npadding: %d" % [_sender_verify, _receiver_verify, _padding]
+        # LOG.logt 'decrypt_packet', "sender verify: %08x\nreceiver verify: %08x\npadding: %d" % [_sender_verify, _receiver_verify, _padding]
         dec_packet[13..-1].bytes
       end
 
+      def self.check_and_decrypt(ip, id, packet, remote_ip, remote_port)
+        protocol = packet[0]
+        if Kademlia::Constants::ALL_PROTOCOL_HEADERS.include?(protocol)
+          packet
+        else
+          decrypt_packet(ip, id, packet, remote_ip, remote_port)
+        end
+      end
+
       def self.check_and_encrypt(ip, kad_id, raw_packet, version)
-        return raw_packet.pack('C*') if version < Kademlia::Constants::KAD_VERSION_MIN_ENCRYPTION
+        return raw_packet if version < Kademlia::Constants::KAD_VERSION_MIN_ENCRYPTION
 
         # Random.rand(0..65535)
         self.encrypt_packet(0, ip, kad_id, raw_packet)
@@ -134,53 +145,60 @@ module Kademlia
       #   +14 uint8[16]   sender_id(+self_id+)
       def self.kad2_req(max_required, ip, contact_id, target_id, version)
         kad_packet = kad_header(:kad2_req) +
-            [max_required, *target_id.array, *contact_id.array]
-        check_and_encrypt(ip, contact_id.array, kad_packet, version)
+            [max_required, *target_id.kad_bytes, *contact_id.kad_bytes]
+        check_and_encrypt(ip, contact_id.kad_bytes, kad_packet, version)
       end
 
-      ##
-      # kad2_req by keyword
-      # packet:
-      # search_type = 3
-      # target_id = MD4(UTF8(keyword))
-      def self.kad2_keyword_req(ip, contact_id, version, keyword)
-        target_id = OpenSSL::Digest::MD4.digest(keyword)
-        self.kad2_req(2, ip, contact_id, target_id.bytes, version)
+      def self.kad2_search_key_req(ip, contact_id, keyword, version)
+        enc = OpenSSL::Digest::MD4.digest(keyword).bytes
+        target_id = KadID.from_md4_bytes(enc)
+        kad_packet = kad_header(:kad2_search_key_req) +
+            target_id.kad_bytes + [0x00, 0x80] +
+            [1] + [keyword.bytes.size].pack('v').unpack('C*') +
+            keyword.bytes
+        logt 'kad2_search_key_req', "keyword: '#{keyword}', id: '#{target_id.to_s}'"
+        check_and_encrypt(ip, contact_id.kad_bytes, kad_packet, version)
       end
+
+      # ##
+      # # kad2_req by keyword
+      # # packet:
+      # # search_type = 3
+      # # target_id = MD4(UTF8(keyword))
+      # def self.kad2_keyword_req(ip, contact_id, version, keyword)
+      #   target_id = OpenSSL::Digest::MD4.digest(keyword)
+      #   self.kad2_req(2, ip, contact_id, target_id.bytes, version)
+      # end
 
       ##
       # kad_header
       #   +00 uint8 0xe4
       #   +01 uint8 opcode
       def self.kad_header(opcode_name)
-        [Kademlia::Constants::KAD_PROTOCOL, Kademlia::Constants::GET_OPCODE[opcode_name]]
+        [Constants::KAD_PROTOCOL, Constants::GET_OPCODE[opcode_name]]
       end
     end
 
     attr_reader :opcode, :content, :bytes
 
     def initialize(kad_client, str, ip, id, remote_ip, remote_port)
-      raw_str = str
-      protocol, opc = str[0..1].unpack('C2')
-      if protocol != Kademlia::Constants::KAD_PROTOCOL
-        # puts protocol
-        str = Helpers.decrypt_packet(ip, id, raw_str.bytes, remote_ip, remote_port).pack('C*')
-        protocol, opc = str[0..1].unpack('C2')
+      decrypted_bytes = Helpers.check_and_decrypt(ip, id, str.bytes, remote_ip, remote_port)
+      protocol, opc = decrypted_bytes[0..1]
+      content_bytes = decrypted_bytes[2..-1]
 
-        raise Kademlia::Error::InvalidKadPacket, "unknown protocol #{protocol}" unless
-            protocol == Kademlia::Constants::KAD_PROTOCOL
+      if protocol == Constants::KAD_PACKED_PROTOCOL
+        protocol = Constants::KAD_PROTOCOL
+        content_bytes = Zlib::Inflate.inflate(content_bytes.pack('C*')).bytes
+      elsif protocol == Constants::KAD_PROTOCOL
+        # do nothing
+      else
+        raise Error::InvalidKadPacket, "unknown protocol byte #{protocol}"
       end
 
-      @opcode = Kademlia::Constants::OPCODE_NAME[opc]
-      raise Kademlia::Error::InvalidKadPacket, "Unknown opcode #{@opcode}" unless @opcode
-      @bytes = str[2..-1].unpack('C*')
+      @opcode = Constants::OPCODE_NAME[opc]
+      raise Error::InvalidKadPacket, "Unknown opcode #{@opcode}" unless @opcode
+      @bytes = content_bytes
       case @opcode
-        when :kad2_bootstrap_res
-        when :kad2_hello_res
-          hello_res = parse_hello_res(@bytes)
-        # puts hello_res
-        when :kad2_req
-          # puts 'kad2_req'
         when :kad2_res
           # puts "kad2_res from #{ip}"
           count = @bytes[0x10]
@@ -188,8 +206,8 @@ module Kademlia
           def parse_contact(bytes)
             begin
               {
-                  id: Kademlia::Utils::KadID.new(bytes[0, 16]),
-                  ip: Kademlia::Utils::IPAddress.from_uint32_le_byte_array(bytes[16, 4]),
+                  id: KadID.from_kad_bytes(bytes[0, 16]),
+                  ip: Utils::IPAddress.from_uint32_le_byte_array(bytes[16, 4]),
                   udp_port: bytes[20] + (bytes[21] << 8),
                   tcp_port: bytes[22] + (bytes[23] << 8),
                   version: bytes[24]
@@ -202,10 +220,13 @@ module Kademlia
             contacts << parse_contact(@bytes[0x11 + 25 * i, 25])
           end
           @content = {
-              target_id: Kademlia::Utils::KadID.new(@bytes[0, 0x10]),
+              target_id: KadID.from_kad_bytes(@bytes[0, 0x10]),
               count: count,
               contacts: contacts
           }
+        when :kad2_search_res
+          logt 'UDP thread', '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!kad2_research_res'
+          File.write('content.txt', @bytes.pack('C*'))
         else
       end
     end

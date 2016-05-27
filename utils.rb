@@ -1,4 +1,5 @@
 require 'time'
+require_relative 'kad_id'
 
 module Kademlia
   module Error
@@ -17,7 +18,30 @@ module Kademlia
       NOTES = 4
     end
 
+    EDONKEY_PROTOCOL = 0xe3
+    EDONKEY_PACKET_PROTOCOL = 0xd4
+    EMULE_PROTOCOL = 0xc5
+    UDP_RESERVED1_PROTOCOL = 0xa3
+    UDP_RESERVED2_PROTOCOL = 0xb2
     KAD_PROTOCOL = 0xe4
+    KAD_PACKED_PROTOCOL = 0xe5
+    ED2K_V2_HEADER = 0xf4
+    ED2K_V2_PACKET_PROTOCOL = 0xf5
+    MLDONKEY_PROTOCOL = 0x00
+
+    ALL_PROTOCOL_HEADERS = [
+        EDONKEY_PROTOCOL,
+        EDONKEY_PACKET_PROTOCOL,
+        EMULE_PROTOCOL,
+        UDP_RESERVED1_PROTOCOL,
+        UDP_RESERVED2_PROTOCOL,
+        KAD_PROTOCOL,
+        KAD_PACKED_PROTOCOL,
+        ED2K_V2_HEADER,
+        ED2K_V2_PACKET_PROTOCOL,
+        MLDONKEY_PROTOCOL
+    ]
+
     OPCODE_NAME = {
         0x01 => :kad2_bootstrap_req,
         0x09 => :kad2_bootstrap_res,
@@ -43,77 +67,6 @@ module Kademlia
     GET_OPCODE = OPCODE_NAME.invert
   end
   module Utils
-    class MessageQueue
-      module Error
-        UnknownMessageError = Class.new(Exception)
-        UnHandledMessageError = Class.new(Exception)
-      end
-      ##
-      # create a message queue and set handlers with block
-      # @param block
-      #
-      # examples:
-      #   MessageQueue.new do |handler|
-      #     handler.on_req(lambda) do |m|
-      #       # do something
-      #     end
-      #     handler.on(name) do |m|
-      #       # do something
-      #     end
-      #     handler.on(name, lambda) do |m|
-      #     end
-      # message_handler = { name: 'a', filter: , handler:, ... }
-      def initialize(&block)
-        @queue = Queue.new
-        obj = MyObject.new
-        block.call(obj)
-        @handlers = obj.message_handlers
-      end
-
-      def <<(message)
-        @queue << message
-      end
-
-      def start_blocking
-        loop do
-          message = @queue.pop
-          name = message[:name]
-          if @handlers[name]
-            handled = false
-            @handlers[name].each do |handler|
-              if !handler[:filter] || handler[:filter].call(message)
-                handler[:handler].call(message)
-                handled = true
-                break
-              end
-            end
-            raise Error::UnHandledMessageError, "message #{message}" unless handled
-          else
-            raise Error::UnknownMessageError, "message name: #{name}"
-          end
-        end
-      end
-
-      private
-      class MyObject
-        attr_reader :message_handlers
-        def initialize
-          @message_handlers = Hash.new { Array.new }
-        end
-        def on(name, lambda = nil, &block)
-          @message_handlers[name] += [{ filter: lambda, handler: block }]
-        end
-        def method_missing(name, *params, &block)
-          if name.to_s =~ /on_(.+)$/
-            message_name = $1
-            on(message_name, *params, &block)
-          else
-            super
-          end
-        end
-      end
-    end
-
     class Logger
       TAG_MAX_WIDTH = 16
       def initialize(target = nil, attr = 'w')
@@ -200,44 +153,6 @@ module Kademlia
         @numbers.reverse
       end
 
-    end
-
-    class KadID
-      attr_reader :array
-      def initialize(arr)
-        if arr.is_a?(Array) && arr.size == 16
-          arr.each do |x|
-            raise ArgumentError, 'invalid uint8 array' unless x >= 0 && x < 256
-          end
-          @array = arr
-        else
-          raise ArgumentError, 'parameter must be an uint8 array'
-        end
-      end
-
-      def ==(other)
-        if other.is_a?(KadID)
-          self.array == other.array
-        else
-          false
-        end
-      end
-
-      def to_s
-        @array.map { |x| '%02x' % x }.join(' ')
-      end
-    end
-
-    class Node
-      attr_reader :id, :ip, :udp_port, :tcp_port, :udp_key, :version
-      def initialize(id, ip, udp_port, tcp_port, udp_key, version)
-        @id = id
-        @ip = ip
-        @udp_port = udp_port
-        @tcp_port = tcp_port
-        @udp_key = udp_key
-        @version = version
-      end
     end
 
     module BinaryBuilder
@@ -354,7 +269,7 @@ module Kademlia
 
         is_struct = false
         if type.is_a? Array
-          if type[0] == :array
+          if type[0] == :kad_bytes
             element_size, element_type = type[1..2]
             is_struct = element_type == :struct
             value, total_size = parse_array(parent, name, bytes, offset, element_type, element_size, constraints, block)
@@ -395,17 +310,17 @@ module Kademlia
           field.at +0x00, :uint32, :magic, [0]
           field.at +0x04, :uint32, :version
           field.at(+0x08, :uint32, :num_of_contacts)
-          field.at +0x0c, [:array, :num_of_contacts, :struct], :contacts do |inner_field|
-            inner_field.at +0x00, [:array, 16, :uint8], :id, :map do |id|
-              Kademlia::Utils::KadID.new(id)
+          field.at +0x0c, [:kad_bytes, :num_of_contacts, :struct], :contacts do |inner_field|
+            inner_field.at +0x00, [:kad_bytes, 16, :uint8], :id, :map do |id|
+              Kademlia::KadID.from_kad_bytes(id)
             end
-            inner_field.at +0x10, [:array, 4,  :uint8], :ip, :map do |ip|
+            inner_field.at +0x10, [:kad_bytes, 4, :uint8], :ip, :map do |ip|
               Kademlia::Utils::IPAddress.from_uint32_le_byte_array(ip)
             end
             inner_field.at +0x14, :uint16, :udp_port
             inner_field.at +0x16, :uint16, :tcp_port
             inner_field.at +0x18, :uint8,  :version
-            inner_field.at +0x19, [:array, 8, :uint8], :kad_udp_key
+            inner_field.at +0x19, [:kad_bytes, 8, :uint8], :kad_udp_key
             inner_field.at +0x21, :uint8,  :verified
           end
         end
