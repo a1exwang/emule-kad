@@ -18,8 +18,12 @@ module Kademlia
 
     include Comparable
     def <=>(other)
-      @id <=> other.id
+      if other.is_a?(Contact)
+        @id <=> other.id
+      end
+
     end
+
 
     def update_responding_time
       @last_respond_at = Time.now

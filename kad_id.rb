@@ -1,3 +1,5 @@
+require 'openssl'
+
 module Kademlia
   class KadID
     BIT_WIDTH = 128
@@ -60,6 +62,10 @@ module Kademlia
       KadID.from_kad_bytes(array)
     end
 
+    def self.from_utf8_str(str)
+      self.from_md4_bytes OpenSSL::Digest::MD4.digest(str.force_encoding('utf-8')).bytes
+    end
+
     def equal?(other)
       (self <=> other) == 0
     end
@@ -70,6 +76,10 @@ module Kademlia
         new_arr[i] = @le_bytes[i] ^ other.le_bytes[i]
       end
       KadID.new(new_arr)
+    end
+
+    def dis(other)
+      self ^ other
     end
 
     def to_s

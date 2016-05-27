@@ -205,13 +205,14 @@ module Kademlia
           contacts = []
           def parse_contact(bytes)
             begin
-              {
-                  id: KadID.from_kad_bytes(bytes[0, 16]),
-                  ip: Utils::IPAddress.from_uint32_le_byte_array(bytes[16, 4]),
-                  udp_port: bytes[20] + (bytes[21] << 8),
-                  tcp_port: bytes[22] + (bytes[23] << 8),
-                  version: bytes[24]
-              }
+              Kademlia::Contact.new(
+                  KadID.from_kad_bytes(bytes[0, 16]),
+                  Utils::IPAddress.from_uint32_le_byte_array(bytes[16, 4]),
+                  bytes[20] + (bytes[21] << 8),
+                  bytes[22] + (bytes[23] << 8),
+                  [0]*8, # UDP key
+                  bytes[24]
+              )
             rescue Exception => e
               puts e
             end

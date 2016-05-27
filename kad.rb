@@ -3,6 +3,8 @@ require_relative 'prefs'
 require_relative 'packet'
 require_relative 'kad_id'
 require_relative 'message_queue'
+require_relative 'bucket'
+require_relative 'search'
 
 require 'socket'
 
@@ -11,16 +13,24 @@ Thread.abort_on_exception = true
 LOG = Kademlia::Utils::Logger.new
 
 class KadClient
+
+  FIND_NODE_COUNT = 0xb
+
+  def initialize(bootstrap_contacts)
+    @prefs = Kademlia::Utils::Prefs.new
+    @ip = KadClient.get_local_ip
+    @root_bucket = Kademlia::Bucket.create_root(@prefs.kad_id)
+    @bootstrap_contacts = bootstrap_contacts
+    @searches = []
+    init_udp
+  end
+
   ##
   # add_contact(contact)
   # @param: contact, contact object or contact array
   def add_contact(contact)
-    @contacts.each do |c|
-      if c[:id] == contact[:id] || @prefs.kad_id == contact[:id]
-        return
-      end
-    end
-    @contacts << contact
+    raise ArgumentError unless contact.is_a?(Kademlia::Contact)
+    @root_bucket.add_contact(contact)
   end
 
   def init_udp
@@ -48,35 +58,24 @@ class KadClient
     end
   end
 
-  def initialize
-    @prefs = Kademlia::Utils::Prefs.new
-    @ip = KadClient.get_local_ip
-    @contacts = []
-    init_udp
-  end
-
   def init_queue(q)
     @message_queue = q
   end
 
-  def bootstrap_from_contacts
-    find_node(@contacts, @prefs.kad_id)
-  end
-
-  def find_node_in_contacts(kad_id)
-    find_node(@contacts, kad_id)
+  def bootstrap
+    find_node(@prefs.kad_id)
   end
 
   def search_keyword(keyword)
-    @contacts.each do |node|
-      begin
-        bytes = Kademlia::Packet::Helpers.kad2_search_key_req(node[:ip], node[:id], keyword, 4)
-        @udp_socket.send(bytes.pack('C*'), 0, node[:ip].to_s, node[:udp_port])
-        LOG.logt 'search_keyword', "keyword '#{keyword}' id #{} to #{node[:ip]}:#{node[:udp_port]}"
-      rescue Errno::EINVAL => e
-        puts e
-      end
-    end
+    # @contacts.each do |node|
+    #   begin
+    #     bytes = Kademlia::Packet::Helpers.kad2_search_key_req(node[:ip], node[:id], keyword, 4)
+    #     @udp_socket.send(bytes.pack('C*'), 0, node[:ip].to_s, node[:udp_port])
+    #     LOG.logt 'search_keyword', "keyword '#{keyword}' id #{} to #{node[:ip]}:#{node[:udp_port]}"
+    #   rescue Errno::EINVAL => e
+    #     puts e
+    #   end
+    # end
   end
 
   # get global ip address at local machine
@@ -98,82 +97,101 @@ class KadClient
     @message_queue.start_blocking
   end
 
-  def find_node(contacts, kad_id)
-    contacts.each do |node|
-      begin
-        bytes = Kademlia::Packet::Helpers.kad2_req(0xb, node[:ip], node[:id], kad_id, node[:version])
-        @udp_socket.send(bytes.pack('C*'),
-                         0, node[:ip].to_s, node[:udp_port])
-        LOG.logt 'find_node', "target '#{kad_id}' to #{node[:ip]}:#{node[:udp_port]}"
-      rescue Errno::EINVAL => e
-        puts e
-      end
-    end
+  def find_node(kad_id)
+    contacts = @root_bucket.find_closest(kad_id, FIND_NODE_COUNT)
+    search = Kademlia::NodeIDSearch.new(kad_id, contacts)
+    @message_queue << {
+        name: 'find_node',
+        search: search
+    }
   end
 
+  def socket
+    @udp_socket
+  end
 end
 
-kad_client = KadClient.new
+bootstrap_contacts = Kademlia::Utils::Helpers.parse_nodes_dat('nodes.dat')
+kad_client = KadClient.new(bootstrap_contacts)
 
-@contacts = Kademlia::Utils::Helpers.parse_nodes_dat('nodes.dat')
-main = {
-    id: Kademlia::KadID.from_kad_bytes('a5 21 f3 2d 63 9f a8 56 56 c6 3e c1 09 55 0f d6'.split.map {|x| x.to_i(16)}) ,
-    ip: Kademlia::Utils::IPAddress.new(KadClient.get_local_ip),
-    udp_port: 4672,
-    tcp_port: 4662,
-    version: 8,
-    kad_udp_key: [0]*8,
-    verified: 1
-}
-main2 = {
-    id: Kademlia::KadID.from_kad_bytes('02 ae ee 01 e0 2a c6 05 a1 0b ce c8 90 20 d0 67'.split.map {|x| x.to_i(16)}),
-    ip: Kademlia::Utils::IPAddress.new('192.168.199.5'),
-    udp_port: 4672,
-    tcp_port: 4662,
-    version: 8,
-    kad_udp_key: [0]*8,
-    verified: 1
-}
+main = Kademlia::Contact.new(
+    Kademlia::KadID.from_kad_bytes('a5 21 f3 2d 63 9f a8 56 56 c6 3e c1 09 55 0f d6'.split.map {|x| x.to_i(16)}) ,
+    Kademlia::Utils::IPAddress.new(KadClient.get_local_ip),
+    4672,
+    4662,
+    [0]*8,
+    8
+)
+main2 = Kademlia::Contact.new(
+    Kademlia::KadID.from_kad_bytes('02 ae ee 01 e0 2a c6 05 a1 0b ce c8 90 20 d0 67'.split.map {|x| x.to_i(16)}),
+    Kademlia::Utils::IPAddress.new('192.168.199.5'),
+    4672,
+    4662,
+    [0]*8,
+    8
+)
 
 kad_client.add_contact(main2)
 
+q = nil
 q = Kademlia::MessageQueue.new do |e|
   e.on('kad2_res') do |message|
     packet = message[:content]
-    # LOG.logt('MessageQueue', 'kad2 res received')
     packet.content[:contacts].each do |c|
       kad_client.add_contact(c)
     end
   end
-  e.on('timer') do
-    kad_client.bootstrap_from_contacts
+  e.on('bootstrap_timer') do
+    kad_client.bootstrap
   end
   e.on('small_timer') do
     kad_client.search_keyword('abc')
+  end
+  e.on('udp_send') do |message|
+    ip, port, str = message[:ip], message[:port], message[:str]
+    begin
+      kad_client.socket.send(str, 0, ip, port)
+    rescue Errno::EINVAL => ex
+      puts ex
+    end
+    LOG.logt('upd_send', "send #{str.bytes.size} bytes")
+  end
+
+  e.on('find_node') do |message|
+    search = message[:search]
+    kad_id = search.id
+    search.get_unsent_contacts.each do |c|
+      contact = c[:contact]
+      bytes = Kademlia::Packet::Helpers.kad2_req(0xb, contact.ip, contact.id, kad_id, contact.version)
+      q << {
+          name: 'udp_send',
+          str: bytes.pack('C*'),
+          ip: contact.ip.to_s,
+          port: contact.udp_port
+      }
+      LOG.logt 'find_node', "target '#{kad_id}' to #{contact.ip}:#{contact.udp_port}"
+    end
   end
 end
 
 kad_client.init_queue(q)
 
 Thread.new do
-  loop do
-    q << { name: 'timer' }
-    sleep(10000)
-  end
+  sleep 3
+  q << { name: 'bootstrap_timer' }
 end
 
-enc = OpenSSL::Digest::MD4.digest('abc').bytes
-target_id = Kademlia::KadID.from_md4_bytes(enc)
+target_id = Kademlia::KadID.from_utf8_str('abc')
 Thread.new do
-  3.times do
-    kad_client.find_node_in_contacts(target_id)
-    sleep 5
-  end
-  3.times do
-    kad_client.search_keyword('abc')
-    sleep 5
-  end
-  q << { name: 'small_timer' }
+  # 3.times do
+  #   kad_client.find_node(target_id)
+  #   sleep 5
+  # end
+  # 3.times do
+  #   kad_client.search_keyword('abc')
+  #   sleep 5
+  # end
+  # q << { name: 'small_timer' }
 end
 
 kad_client.start

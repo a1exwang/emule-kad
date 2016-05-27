@@ -3,9 +3,6 @@ require_relative 'kad_id'
 require_relative 'contact'
 
 module Kademlia
-  def kad_dis(kad_id1, kad_id2)
-    kad_id1 ^ kad_id2
-  end
 
   class Bucket
 
@@ -15,6 +12,10 @@ module Kademlia
     attr_reader :depth
     attr_reader :contacts
     attr_reader :this_bit
+
+    def self.create_root(self_kad_id)
+      Bucket.new(0, nil, self_kad_id, 0)
+    end
 
     def initialize(depth, parent, self_kad_id, this_bit)
       @depth = depth
@@ -34,8 +35,9 @@ module Kademlia
     # Bucket#add_node(kad_node)
     # @param contact: Kademlia::Contact
     def add_contact(contact)
+      # leaf node
       if self.leaf?
-        # true leaf node
+        return if @contacts.include?(contact)
         insert_contact(contact)
 
         # leaf node that may become a branch node after insertion
@@ -146,21 +148,21 @@ module Kademlia
   end
 end
 
-def random_kad_id
-  Kademlia::KadID.new(Array.new(16) { Random.rand(0...(1<<8)) })
-end
-root = Kademlia::Bucket.new(0, nil, Kademlia::KadID.new([0]*16), 0)
-
-100000.times do |i|
-  id = random_kad_id
-  contact = Kademlia::Contact.new(id, nil, nil, nil, nil, nil)
-  root.add_contact(contact)
-end
-
-root.print_dbg
-target = random_kad_id
-puts "target: #{target.to_s_uint128}"
-y = root.find_closest(target, 10)
-y.each do |x|
-  puts "result, dis: #{(x.id^target).highest_one}, id: #{x.id.to_s_uint128}"
-end
+# def random_kad_id
+#   Kademlia::KadID.new(Array.new(16) { Random.rand(0...(1<<8)) })
+# end
+# root = Kademlia::Bucket.new(0, nil, Kademlia::KadID.new([0]*16), 0)
+#
+# 100000.times do |i|
+#   id = random_kad_id
+#   contact = Kademlia::Contact.new(id, nil, nil, nil, nil, nil)
+#   root.add_contact(contact)
+# end
+#
+# root.print_dbg
+# target = random_kad_id
+# puts "target: #{target.to_s_uint128}"
+# y = root.find_closest(target, 10)
+# y.each do |x|
+#   puts "result, dis: #{(x.id^target).highest_one}, id: #{x.id.to_s_uint128}"
+# end
