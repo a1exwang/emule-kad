@@ -26,6 +26,11 @@ module Kademlia
     end
 
     def add_contact_by_parent_id(contact, parent_id)
+      if parent_id.nil?
+        add_contact(contact)
+        return
+      end
+
       @contact_generations.each_with_index do |g, i|
         g.each do |c|
           if c[:contact].id == parent_id
@@ -38,12 +43,10 @@ module Kademlia
     end
 
     def log_self
-      @contact_generations.each_with_index do |g, i|
-        LOG.logt('search result', 'generation ' + i.to_s)
-        g.each do |c|
-          contact = c[:contact]
-          LOG.logt('search result', "dis :#{(@id ^ contact.id).highest_one}bits, id :#{contact.id}", 4)
-        end
+      LOG.logt('search result', "search generation: #{@contact_generations.size.to_s}, id '#{@id}'")
+      @contact_generations.last.each do |c|
+        contact = c[:contact]
+        LOG.logt('search result', "dis :#{(@id ^ contact.id).highest_one}bits, id :#{contact.id}", 4)
       end
     end
 
@@ -83,6 +86,18 @@ module Kademlia
       end.first(max)
     end
 
+    def get_closest_contacts
+      ret = []
+      @contact_generations.each do |g|
+        g.each do |c|
+          ret << c
+        end
+      end
+      ret.sort do |x, y|
+        (x[:contact].id ^ @id) <=> (y[:contact].id ^ @id)
+      end
+    end
+
     def add_contacts(contacts, parent)
       raise ArgumentError unless contacts.is_a? Array
       contacts.each do |c|
@@ -102,11 +117,11 @@ module Kademlia
     end
   end
 
-  class KeywordSearch < Search
+  class KeywordSearch < NodeIDSearch
     attr_reader :keyword
-    def initialize(keyword)
+    def initialize(keyword, init_contacts)
       @keyword = keyword
-      super(Kademlia::KadID.from_utf8_str(keyword))
+      super(Kademlia::KadID.from_utf8_str(keyword), init_contacts)
     end
   end
 end

@@ -7,7 +7,7 @@ module Kademlia
   class Bucket
 
     MAX_DEPTH = KadID::BIT_WIDTH
-    BUCKET_SIZE = 100
+    BUCKET_SIZE = 3000
     attr_reader :left, :right, :parent
     attr_reader :depth
     attr_reader :contacts

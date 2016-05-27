@@ -1,4 +1,5 @@
 require 'openssl'
+require 'json'
 
 module Kademlia
   class KadID
@@ -49,6 +50,10 @@ module Kademlia
       -1
     end
 
+    def to_json
+      kad_bytes.to_json
+    end
+
     def kad_bytes
       @le_bytes.pack('C*').unpack('V4').reverse.pack('V4').bytes
     end
@@ -57,14 +62,8 @@ module Kademlia
       KadID.new arr.pack('C*').unpack('V4').reverse.pack('V4').bytes
     end
 
-    def self.from_md4_bytes(arr)
-      array = arr.dup
-      array.pack('C*').unpack('N4').pack('V4').bytes
-      KadID.from_kad_bytes(array)
-    end
-
     def self.from_utf8_str(str)
-      self.from_md4_bytes OpenSSL::Digest::MD4.digest(str.force_encoding('utf-8')).bytes
+      KadID.new OpenSSL::Digest::MD4.digest(str.force_encoding('utf-8')).bytes.reverse
     end
 
     def equal?(other)

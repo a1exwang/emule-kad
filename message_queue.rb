@@ -41,19 +41,23 @@ module Kademlia
     def start_blocking
       loop do
         message = @queue.pop
-        name = message[:name]
-        if @handlers[name]
-          handled = false
-          @handlers[name].each do |handler|
-            if !handler[:filter] || handler[:filter].call(message)
-              handler[:handler].call(message)
-              handled = true
-              break
-            end
-          end
-          LOG.logt 'Message Queue', "message unhandled #{message}" unless handled
+        name = message[:name].to_s
+        if name == '__block'
+          message[:__block].call(message)
         else
-          raise Error::UnknownMessageError, "message name: #{name}"
+          if @handlers[name]
+            handled = false
+            @handlers[name].each do |handler|
+              if !handler[:filter] || handler[:filter].call(message)
+                handler[:handler].call(message)
+                handled = true
+                break
+              end
+            end
+            LOG.logt 'Message Queue', "message unhandled #{message}" unless handled
+          else
+            raise Error::UnknownMessageError, "message name: #{name}"
+          end
         end
       end
     end

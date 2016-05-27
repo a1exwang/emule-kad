@@ -1,5 +1,6 @@
-require 'time'
+require_relative 'contact'
 require_relative 'kad_id'
+require 'time'
 
 module Kademlia
   module Error
@@ -273,7 +274,7 @@ module Kademlia
 
         is_struct = false
         if type.is_a? Array
-          if type[0] == :kad_bytes
+          if type[0] == :array
             element_size, element_type = type[1..2]
             is_struct = element_type == :struct
             value, total_size = parse_array(parent, name, bytes, offset, element_type, element_size, constraints, block)
@@ -314,21 +315,25 @@ module Kademlia
           field.at +0x00, :uint32, :magic, [0]
           field.at +0x04, :uint32, :version
           field.at(+0x08, :uint32, :num_of_contacts)
-          field.at +0x0c, [:kad_bytes, :num_of_contacts, :struct], :contacts do |inner_field|
-            inner_field.at +0x00, [:kad_bytes, 16, :uint8], :id, :map do |id|
+          field.at +0x0c, [:array, :num_of_contacts, :struct], :contacts do |inner_field|
+            inner_field.at +0x00, [:array, 16, :uint8], :id, :map do |id|
               Kademlia::KadID.from_kad_bytes(id)
             end
-            inner_field.at +0x10, [:kad_bytes, 4, :uint8], :ip, :map do |ip|
+            inner_field.at +0x10, [:array, 4, :uint8], :ip, :map do |ip|
               Kademlia::Utils::IPAddress.from_uint32_le_byte_array(ip)
             end
             inner_field.at +0x14, :uint16, :udp_port
             inner_field.at +0x16, :uint16, :tcp_port
             inner_field.at +0x18, :uint8,  :version
-            inner_field.at +0x19, [:kad_bytes, 8, :uint8], :kad_udp_key
+            inner_field.at +0x19, [:array, 8, :uint8], :kad_udp_key
             inner_field.at +0x21, :uint8,  :verified
           end
         end
-        nodes_dat[:contacts]
+        ret = []
+        nodes_dat[:contacts].each do |c|
+          ret << Kademlia::Contact.new(c[:id], c[:ip], c[:udp_port], c[:tcp_port], c[:kad_udp_key], c[:version]) if c[:verified] != 0
+        end
+        ret
       end
     end
   end

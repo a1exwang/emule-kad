@@ -30,6 +30,12 @@ class KadClient
     @root_bucket.add_contact(contact)
   end
 
+  def merge_bootstrap_contacts
+    @bootstrap_contacts.each do |c|
+      @root_bucket.add_contact c
+    end
+  end
+
   def init_udp
     @udp_socket = UDPSocket.new
     @udp_socket.bind(@ip, @prefs.kad_udp_port)
@@ -63,17 +69,6 @@ class KadClient
     find_node(@prefs.kad_id)
   end
 
-  def search_keyword(keyword)
-    # @contacts.each do |node|
-    #   begin
-    #     bytes = Kademlia::Packet::Helpers.kad2_search_key_req(node[:ip], node[:id], keyword, 4)
-    #     @udp_socket.send(bytes.pack('C*'), 0, node[:ip].to_s, node[:udp_port])
-    #     LOG.logt 'search_keyword', "keyword '#{keyword}' id #{} to #{node[:ip]}:#{node[:udp_port]}"
-    #   rescue Errno::EINVAL => e
-    #     puts e
-    #   end
-    # end
-  end
 
   # get global ip address at local machine
   # return value: String. e.g. '1.1.1.1'
@@ -103,16 +98,50 @@ class KadClient
         search: search
     }
   end
+  def search_keyword(keyword)
+    target_id = Kademlia::KadID.from_utf8_str(keyword)
+    init_contacts = @root_bucket.find_closest(target_id, Kademlia::NodeIDSearch::FIND_NODE_COUNT)
+    search = Kademlia::KeywordSearch.new(keyword, init_contacts)
+    @searches << search
+    @message_queue << {
+        name: 'find_node',
+        search: search
+    }
+    # @contacts.each do |node|
+    #   begin
+    #     bytes = Kademlia::Packet::Helpers.kad2_search_key_req(node[:ip], node[:id], keyword, 4)
+    #     @udp_socket.send(bytes.pack('C*'), 0, node[:ip].to_s, node[:udp_port])
+    #     LOG.logt 'search_keyword', "keyword '#{keyword}' id #{} to #{node[:ip]}:#{node[:udp_port]}"
+    #   rescue Errno::EINVAL => e
+    #     puts e
+    #   end
+    # end
+  end
+
 
   def socket
     @udp_socket
+  end
+
+  def socket_send(ip, port, str)
+    @message_queue << {
+        name: 'udp_send',
+        str: str,
+        ip: ip.to_s,
+        port: port
+    }
+  end
+
+  def send_find_key_request(contact, keyword)
+    bytes = Kademlia::Packet::Helpers.kad2_search_key_req(contact.ip, contact.id, keyword, contact.version)
+    socket_send(contact.ip, contact.udp_port, bytes.pack('C*'))
   end
 
   def main1
 
     main = Kademlia::Contact.new(
         Kademlia::KadID.from_kad_bytes('a5 21 f3 2d 63 9f a8 56 56 c6 3e c1 09 55 0f d6'.split.map {|x| x.to_i(16)}) ,
-        Kademlia::Utils::IPAddress.new(KadClient.get_local_ip),
+        Kademlia::Utils::IPAddress.new('183.173.56.64'),
         4672,
         4662,
         [0]*8,
@@ -120,7 +149,7 @@ class KadClient
     )
     main2 = Kademlia::Contact.new(
         Kademlia::KadID.from_kad_bytes('02 ae ee 01 e0 2a c6 05 a1 0b ce c8 90 20 d0 67'.split.map {|x| x.to_i(16)}),
-        Kademlia::Utils::IPAddress.new('192.168.199.5'),
+        Kademlia::Utils::IPAddress.new('183.173.58.6'),
         4672,
         4662,
         [0]*8,
@@ -128,6 +157,7 @@ class KadClient
     )
 
     add_contact(main2)
+    # merge_bootstrap_contacts
 
     q = nil
     q = Kademlia::MessageQueue.new do |e|
@@ -144,14 +174,22 @@ class KadClient
             x.ip == packet.content[:remote_ip] && x.udp_port == packet.content[:remote_udp_port]
           end
           if parent.nil?
-            parent_id = @prefs.kad_id
-            LOG.logt('kad2 res', 'add contact to search parent not found, maybe delete by insertion')
+            # LOG.logt('kad2 res', 'add contact to search parent not found, maybe delete by insertion')
+            search.add_contact_by_parent_id(c, nil)
           else
             parent_id = parent.id
             search.add_contact_by_parent_id(c, parent_id)
           end
         end
       end
+
+      e.on('kad2_search_res') do |message|
+        packet = message[:content]
+        LOG.logt('kad2_find_res', "packet: #{packet}")
+        File.write(Time.now.strftime('res-%H-%M-%S.%6N.json'), packet.content.to_json)
+        # parse kad2 find res and add to result list
+      end
+
       e.on('bootstrap_timer') do
         bootstrap
       end
@@ -165,7 +203,7 @@ class KadClient
         rescue Errno::EINVAL => ex
           puts ex
         end
-        LOG.logt('upd_send', "send #{str.bytes.size} bytes")
+        # LOG.logt('upd_send', "send #{str.bytes.size} bytes")
       end
 
       e.on('find_node') do |message|
@@ -176,28 +214,31 @@ class KadClient
           # start sending find key request
           LOG.logt('find_node', 'find node stall!!!!!!!!!')
           search.log_self
+          if search.is_a?(Kademlia::KeywordSearch)
+            # send find key request
+            search.get_closest_contacts.each do |c|
+              send_find_key_request(c[:contact], search.keyword)
+            end
+          end
         else
           # send find node request to nearer contacts
           result.each do |c|
             contact = c[:contact]
             bytes = Kademlia::Packet::Helpers.kad2_req(0xb, contact.ip, contact.id, kad_id, contact.version)
-            q << {
-                name: 'udp_send',
-                str: bytes.pack('C*'),
-                ip: contact.ip.to_s,
-                port: contact.udp_port
-            }
+            socket_send(contact.ip, contact.udp_port, bytes.pack('C*'))
             LOG.logt 'find_node', "target '#{kad_id}' to #{contact.ip}:#{contact.udp_port}"
           end
 
-          q.send_delay(5, name: 'find_node', search: search)
+          q.send_delay(2, name: 'find_node', search: search)
         end
       end
     end
 
     init_queue(q)
     q.send_delay(0.5, name: 'bootstrap_timer')
-    start
+    Thread.new { sleep 10; self.search_keyword('abc') }
+    # Thread.new { send_find_key_request(main, 'abc') }
+    self.start
   end
 end
 

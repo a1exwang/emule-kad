@@ -1,7 +1,9 @@
+require_relative 'utils'
 require 'rc4'
 require 'digest/md5'
 require 'openssl'
 require 'zlib'
+require 'time'
 
 def ip_from_s(str)
   ip0, ip1, ip2, ip3 = str.split('.').map {|x| x.to_i}
@@ -11,6 +13,90 @@ end
 LOCAL_KAD_UDP_KEY = 0x22334455
 def get_udp_verify_key(ip, local_kad_udp_key)
   Digest::MD5.digest([ip, local_kad_udp_key].pack('VV')).unpack('VVVV').reduce(&:^) % 0xFFFFFFFE + 1
+end
+
+TAG_TYPE_STRING = 2
+TAG_TYPE_UINT32 = 3
+TAG_TYPE_UINT8 = 9
+
+TAG_NAME_FILE_NAME = "\x01"
+TAG_NAME_FILE_SIZE = "\x02"
+TAG_NAME_FILE_SIZE_HI = "\x3A"
+TAG_NAME_FILE_TYPE = "\x03"
+TAG_NAME_AVAILABILITY = "\x15"
+TAG_PUBLISH_INFO = "\x33"
+TAG_NAME_MAP = {
+    TAG_NAME_FILE_NAME => 'file_name',
+    TAG_NAME_FILE_SIZE => 'file_size',
+    TAG_NAME_FILE_TYPE => 'file_type',
+    TAG_NAME_AVAILABILITY => 'availability',
+    TAG_PUBLISH_INFO => 'publish_info'
+}
+def parse_search_req(bytes)
+
+  content = Kademlia::Utils::BinaryParser.parse(bytes) do |field|
+    field.at +0x00, [:array, 16, :uint8], :sender_id, :map do |id|
+      Kademlia::KadID.from_kad_bytes(id)
+    end
+    field.at +0x10, [:array, 16, :uint8], :target_id, :map do |id|
+      Kademlia::KadID.from_kad_bytes(id)
+    end
+    field.at +0x20, :uint16, :count
+  end
+
+  tag_bytes = bytes[0x22..-1]
+
+  def parse_str(bytes, start)
+    len = bytes[start] + (bytes[start+1] << 8)
+    [bytes[start+2, len].pack('C*'), len+2]
+  end
+  def parse_uint32(bytes, start)
+    bytes[start, 4].pack('C4').unpack('V').first
+  end
+
+
+  def parse_tag(bytes, start)
+    type = bytes[start]
+    name, len = parse_str(bytes, start + 1)
+    readable_name = TAG_NAME_MAP[name] || name
+    tag = {}
+    size = 1 + len
+    case type
+      when TAG_TYPE_STRING
+        tag[readable_name], len = parse_str(bytes, start + size)
+      when TAG_TYPE_UINT32
+        tag[readable_name] = parse_uint32(bytes, start + size)
+        len = 4
+      when TAG_TYPE_UINT8
+        tag[readable_name] = bytes[start + size]
+        len = 1
+      else
+        puts 'other tag type'
+    end
+    size += len
+    [tag, size]
+  end
+  def parse_answer(bytes, start)
+    answer = Kademlia::KadID.from_kad_bytes(bytes[start, 16])
+    tag_count = bytes[start+16]
+    size = 16 + 1
+    tags = []
+    tag_count.times do
+      tag, this_size = parse_tag(bytes, start + size)
+      size += this_size
+      tags << tag
+    end
+    [{ answer: answer, tags: tags }, size]
+  end
+
+  current = 0
+  answers = []
+  content[:count].times do
+    ans, size = parse_answer(tag_bytes, current)
+    answers << ans
+    current += size
+  end
+  { sender_id: content[:sender_id], target_id: content[:target_id], answers: answers }
 end
 
 module Kademlia
@@ -103,7 +189,7 @@ module Kademlia
       end
 
       def self.check_and_encrypt(ip, kad_id, raw_packet, version)
-        return raw_packet if version < Kademlia::Constants::KAD_VERSION_MIN_ENCRYPTION
+        return raw_packet #if version < Kademlia::Constants::KAD_VERSION_MIN_ENCRYPTION
 
         # Random.rand(0..65535)
         self.encrypt_packet(0, ip, kad_id, raw_packet)
@@ -150,13 +236,12 @@ module Kademlia
       end
 
       def self.kad2_search_key_req(ip, contact_id, keyword, version)
-        enc = OpenSSL::Digest::MD4.digest(keyword).bytes
-        target_id = KadID.from_md4_bytes(enc)
+        target_id = KadID.from_utf8_str(keyword)
         kad_packet = kad_header(:kad2_search_key_req) +
             target_id.kad_bytes + [0x00, 0x80] +
             [1] + [keyword.bytes.size].pack('v').unpack('C*') +
             keyword.bytes
-        logt 'kad2_search_key_req', "keyword: '#{keyword}', id: '#{target_id.to_s}'"
+        LOG.logt 'kad2_search_key_req', "keyword: '#{keyword}', id: '#{target_id.to_s}'"
         check_and_encrypt(ip, contact_id.kad_bytes, kad_packet, version)
       end
 
@@ -188,7 +273,13 @@ module Kademlia
 
       if protocol == Constants::KAD_PACKED_PROTOCOL
         protocol = Constants::KAD_PROTOCOL
-        content_bytes = Zlib::Inflate.inflate(content_bytes.pack('C*')).bytes
+        begin
+          content_bytes = Zlib::Inflate.inflate(content_bytes.pack('C*')).bytes
+        rescue Zlib::BufError => e
+          File.write(Time.now.strftime('dump/zlib_buf_err_%H_%M_%S.%6N.dump'), content_bytes)
+          opc = 0
+          puts 'buf err'
+        end
       elsif protocol == Constants::KAD_PROTOCOL
         # do nothing
       else
@@ -196,11 +287,10 @@ module Kademlia
       end
 
       @opcode = Constants::OPCODE_NAME[opc]
-      raise Error::InvalidKadPacket, "Unknown opcode #{@opcode}" unless @opcode
+      LOG.log 'packet', "Error!!!! Unknown opcode #{opc}" unless @opcode
       @bytes = content_bytes
       case @opcode
         when :kad2_res
-          # puts "kad2_res from #{ip}"
           count = @bytes[0x10]
           contacts = []
           def parse_contact(bytes)
@@ -228,8 +318,9 @@ module Kademlia
               remote_udp_port: remote_port
           }
         when :kad2_search_res
-          logt 'UDP thread', '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!kad2_research_res'
-          File.write('content.txt', @bytes.pack('C*'))
+          @content = parse_search_req(@bytes)
+          @content[:remote_ip] = remote_ip
+          @content[:remote_udp_port] = remote_port
         else
       end
     end
