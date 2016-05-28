@@ -272,6 +272,19 @@ module Kademlia
     end
 
     module Helpers
+      # get global ip address at local machine
+      # return value: String. e.g. '1.1.1.1'
+      def self.get_local_ip
+        interface = `route | grep default`.split.last
+        if `ifconfig #{interface}` =~ /inet addr:([.0-9]+)/i
+          $1
+        else
+          raise RuntimeError, 'cannot get local ip'
+        end
+        # addrs = Socket.ip_address_list.reject { |x| ! x.ipv4? || x.ipv4_loopback? }
+        # addrs.first.ip_address
+      end
+
       def self.parse_nodes_dat(bytes)
         nodes_dat = Kademlia::Utils::BinaryParser.parse(bytes) do |field|
           field.at +0x00, :uint32, :magic, [0]

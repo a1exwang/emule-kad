@@ -7,7 +7,7 @@ module Kademlia
     attr_reader :search_uid
     def initialize(id)
       @id = id
-      @search_uid = Time.now.strftime('search-%Y-%m-%d_%H_%M_%S.%6N')
+      @search_uid = Time.now.strftime('search-%Y-%m-%d_%H_%M_%S.%6N-') + (0...10).map { ('a'..'z').to_a[Random.rand(26)] }.join
     end
   end
 
@@ -136,6 +136,7 @@ module Kademlia
     attr_reader :last_search_res_at
     attr_reader :results
     attr_accessor :saved
+
     def initialize(keyword, init_contacts)
       @keyword = keyword
       @saved = false
@@ -157,7 +158,7 @@ module Kademlia
       "S_#{@keyword}_uid_#{@search_uid}"
     end
 
-    def to_json(state)
+    def to_json(state = nil)
       {
           name: search_name,
           keyword: @keyword,
