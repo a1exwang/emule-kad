@@ -48,7 +48,7 @@ module Kademlia
       LOG.logt('search result', "search generation: #{@contact_generations.size.to_s}, id '#{@id}'")
       @contact_generations.last.each do |c|
         contact = c[:contact]
-        LOG.logt('search result', "dis :#{(@id ^ contact.id).highest_one}bits, id :#{contact.id}", 4)
+        LOG.logt('search result', "dis: #{(@id ^ contact.id).highest_one}bits, id :#{contact.id}", 4)
       end
     end
 

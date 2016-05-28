@@ -38,27 +38,35 @@ module Kademlia
       end
     end
 
+    def quit
+      self << { name: '__quit' }
+    end
+
     def start_blocking
       loop do
         message = @queue.pop
         name = message[:name].to_s
-        if name == '__block'
-          message[:__block].call(message)
-        else
-          if @handlers[name]
-            handled = false
-            @handlers[name].each do |handler|
-              if !handler[:filter] || handler[:filter].call(message)
-                handler[:handler].call(message)
-                handled = true
-                break
-              end
-            end
-            LOG.logt 'Message Queue', "message unhandled #{message}" unless handled
+        case name
+          when '__block'
+            message[:__block].call(message)
+          when '__quit'
+            LOG.logt('MessageQueue', 'Quiting...')
+            break
           else
-            raise Error::UnknownMessageError, "message name: #{name}"
+            if @handlers[name]
+              handled = false
+              @handlers[name].each do |handler|
+                if !handler[:filter] || handler[:filter].call(message)
+                  handler[:handler].call(message)
+                  handled = true
+                  break
+                end
+              end
+              LOG.logt 'Message Queue', "message unhandled #{message}" unless handled
+            else
+              raise Error::UnknownMessageError, "message name: #{name}"
+            end
           end
-        end
       end
     end
 

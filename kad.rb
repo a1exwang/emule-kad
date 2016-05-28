@@ -5,6 +5,7 @@ require_relative 'kad_id'
 require_relative 'message_queue'
 require_relative 'bucket'
 require_relative 'search'
+require_relative 'api/kad'
 
 require 'socket'
 
@@ -147,7 +148,7 @@ class KadClient
     )
 
     add_contact(main2)
-    # merge_bootstrap_contacts
+    merge_bootstrap_contacts
 
     q = nil
     q = Kademlia::MessageQueue.new do |e|
@@ -255,12 +256,16 @@ class KadClient
 
     init_queue(q)
     q.send_delay(0.5, name: 'bootstrap_timer')
-    Thread.new { sleep 8; self.search_keyword('abc') }
+    # Thread.new { sleep 8; self.search_keyword('abc') }
     Thread.new do
       loop do
         sleep 5
         q << { name: 'save_search_results' }
       end
+    end
+    Thread.new do
+      KadApi.run!(host: 'localhost', port: 8223)
+      @message_queue.quit
     end
     # Thread.new { send_find_key_request(main, 'abc') }
     self.start
@@ -270,3 +275,5 @@ end
 bootstrap_contacts = Kademlia::Utils::Helpers.parse_nodes_dat('nodes.dat')
 kad_client = KadClient.new(bootstrap_contacts)
 kad_client.main1
+
+
