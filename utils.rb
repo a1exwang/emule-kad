@@ -102,6 +102,7 @@ module Kademlia
         @formatter = block
       end
       def log(str, indent = 0, level = 'verbose'.to_sym)
+        raise ArgumentError unless indent.is_a?(Integer) && (level.is_a?(String) || level.is_a?(Symbol))
         logt('', str, indent, level)
       end
       def logt(tag, str, indent = 0, level = 'verbose'.to_sym)
@@ -133,6 +134,9 @@ module Kademlia
 
       def to_s
         @str
+      end
+      def to_json(state = nil)
+        '"' + to_s + '"'
       end
 
       def ==(other)

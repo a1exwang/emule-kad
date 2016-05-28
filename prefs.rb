@@ -17,6 +17,9 @@ module Kademlia
             @kad_udp_port = @kad['udp_port']
             @kad_tcp_port = @kad['tcp_port']
             @mtu = json['mtu']
+
+            json['kad']['id'] = @kad_id
+            File.write(file_path, json.to_json)
           rescue JSON::JSONError
             raise "#{@file_path} format error"
           end

@@ -149,7 +149,7 @@ class KadClient
     )
     main2 = Kademlia::Contact.new(
         Kademlia::KadID.from_kad_bytes('02 ae ee 01 e0 2a c6 05 a1 0b ce c8 90 20 d0 67'.split.map {|x| x.to_i(16)}),
-        Kademlia::Utils::IPAddress.new('183.173.58.6'),
+        Kademlia::Utils::IPAddress.new('192.168.199.5'),
         4672,
         4662,
         [0]*8,
@@ -186,7 +186,7 @@ class KadClient
       e.on('kad2_search_res') do |message|
         packet = message[:content]
         LOG.logt('kad2_find_res', "packet: #{packet}")
-        File.write(Time.now.strftime('res-%H-%M-%S.%6N.json'), packet.content.to_json)
+        File.write(Time.now.strftime('dump/res-%H-%M-%S.%6N.json'), packet.content.to_json)
         # parse kad2 find res and add to result list
       end
 
@@ -236,7 +236,7 @@ class KadClient
 
     init_queue(q)
     q.send_delay(0.5, name: 'bootstrap_timer')
-    Thread.new { sleep 10; self.search_keyword('abc') }
+    Thread.new { sleep 8; self.search_keyword('abc') }
     # Thread.new { send_find_key_request(main, 'abc') }
     self.start
   end

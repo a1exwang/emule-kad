@@ -2,7 +2,7 @@ require_relative 'utils'
 require 'rc4'
 require 'digest/md5'
 require 'openssl'
-require 'zlib'
+# require 'zlib'
 require 'time'
 
 def ip_from_s(str)
@@ -17,7 +17,10 @@ end
 
 TAG_TYPE_STRING = 2
 TAG_TYPE_UINT32 = 3
+TAG_TYPE_UINT16 = 8
 TAG_TYPE_UINT8 = 9
+TAG_TYPE_BSOB = 0xa
+TAG_TYPE_UINT64 = 0xb
 
 TAG_NAME_FILE_NAME = "\x01"
 TAG_NAME_FILE_SIZE = "\x02"
@@ -25,14 +28,20 @@ TAG_NAME_FILE_SIZE_HI = "\x3A"
 TAG_NAME_FILE_TYPE = "\x03"
 TAG_NAME_AVAILABILITY = "\x15"
 TAG_PUBLISH_INFO = "\x33"
+TAG_MEDIA_LENGTH = "\xD3"
+TAG_MEDIA_BITRATE = "\xD4"
+TAG_MEDIA_CODEC = "\xD5"
 TAG_NAME_MAP = {
     TAG_NAME_FILE_NAME => 'file_name',
     TAG_NAME_FILE_SIZE => 'file_size',
     TAG_NAME_FILE_TYPE => 'file_type',
     TAG_NAME_AVAILABILITY => 'availability',
-    TAG_PUBLISH_INFO => 'publish_info'
+    TAG_PUBLISH_INFO => 'publish_info',
+    TAG_MEDIA_LENGTH => 'media_length',
+    TAG_MEDIA_BITRATE => 'media_bitrate',
+    TAG_MEDIA_CODEC => 'media_codec',
 }
-def parse_search_req(bytes)
+def parse_search_res(bytes)
 
   content = Kademlia::Utils::BinaryParser.parse(bytes) do |field|
     field.at +0x00, [:array, 16, :uint8], :sender_id, :map do |id|
@@ -48,17 +57,28 @@ def parse_search_req(bytes)
 
   def parse_str(bytes, start)
     len = bytes[start] + (bytes[start+1] << 8)
-    [bytes[start+2, len].pack('C*'), len+2]
+    [bytes[start+2, len].pack('C*').force_encoding('utf-8'), len+2]
+  end
+
+  def parse_uint16(bytes, start)
+    bytes[start, 2].pack('C2').unpack('v').first
   end
   def parse_uint32(bytes, start)
     bytes[start, 4].pack('C4').unpack('V').first
   end
-
+  def parse_bsob(bytes, start)
+    len = bytes[start]
+    [bytes[start + 1, len], len+1]
+  end
+  def parse_uint64(bytes, start)
+    bytes[start, 4].pack('C4').unpack('V').first +
+      (bytes[start+4, 4].pack('C4').unpack('V').first << 32)
+  end
 
   def parse_tag(bytes, start)
     type = bytes[start]
     name, len = parse_str(bytes, start + 1)
-    readable_name = TAG_NAME_MAP[name] || name
+    readable_name = TAG_NAME_MAP[name] || name.unpack('C').first.to_s
     tag = {}
     size = 1 + len
     case type
@@ -67,11 +87,19 @@ def parse_search_req(bytes)
       when TAG_TYPE_UINT32
         tag[readable_name] = parse_uint32(bytes, start + size)
         len = 4
+      when TAG_TYPE_UINT16
+        tag[readable_name] = parse_uint16(bytes, start + size)
+        len = 2
       when TAG_TYPE_UINT8
         tag[readable_name] = bytes[start + size]
         len = 1
+      when TAG_TYPE_BSOB
+        tag[readable_name], len = parse_bsob(bytes, start + size)
+      when TAG_TYPE_UINT64
+        tag[readable_name] = parse_uint64(bytes, start + size)
+        len = 8
       else
-        puts 'other tag type'
+        raise 'other tag type ' + type.to_s
     end
     size += len
     [tag, size]
@@ -80,24 +108,34 @@ def parse_search_req(bytes)
     answer = Kademlia::KadID.from_kad_bytes(bytes[start, 16])
     tag_count = bytes[start+16]
     size = 16 + 1
-    tags = []
+    tags = {}
     tag_count.times do
       tag, this_size = parse_tag(bytes, start + size)
       size += this_size
-      tags << tag
+      tags.merge! tag
     end
     [{ answer: answer, tags: tags }, size]
   end
 
-  current = 0
-  answers = []
-  content[:count].times do
-    ans, size = parse_answer(tag_bytes, current)
-    answers << ans
-    current += size
+  begin
+    current = 0
+    answers = []
+    content[:count].times do
+      ans, size = parse_answer(tag_bytes, current)
+      answers << ans
+      current += size
+    end
+  rescue Exception => e
+    puts e
+    puts e.backtrace_locations
+    File.write(Time.now.strftime('dump/packet-crash-%H-%M-%S.%6N'), bytes.pack('C*'))
   end
+
   { sender_id: content[:sender_id], target_id: content[:target_id], answers: answers }
 end
+#
+str = File.read('dump/packet-crash-10-29-55.638736')
+res = parse_search_res(str.bytes)
 
 module Kademlia
   class Packet
@@ -241,7 +279,7 @@ module Kademlia
             target_id.kad_bytes + [0x00, 0x80] +
             [1] + [keyword.bytes.size].pack('v').unpack('C*') +
             keyword.bytes
-        LOG.logt 'kad2_search_key_req', "keyword: '#{keyword}', id: '#{target_id.to_s}'"
+        LOG.logt 'kad2_search_key_req', "contact_id: '#{contact_id}', keyword: '#{keyword}', ip: #{ip}"
         check_and_encrypt(ip, contact_id.kad_bytes, kad_packet, version)
       end
 
@@ -273,13 +311,20 @@ module Kademlia
 
       if protocol == Constants::KAD_PACKED_PROTOCOL
         protocol = Constants::KAD_PROTOCOL
-        begin
-          content_bytes = Zlib::Inflate.inflate(content_bytes.pack('C*')).bytes
-        rescue Zlib::BufError => e
-          File.write(Time.now.strftime('dump/zlib_buf_err_%H_%M_%S.%6N.dump'), content_bytes)
-          opc = 0
-          puts 'buf err'
-        end
+        # begin
+          dec_bytes = []
+          IO.popen 'zlib-flate -uncompress', 'r+' do |io|
+            io.write content_bytes.pack('C*')
+            io.close_write
+            dec_bytes = io.read.bytes
+          end
+          content_bytes = dec_bytes
+          # content_bytes = Zlib::Inflate.inflate(content_bytes.pack('C*')).bytes
+        # rescue Zlib::BufError => e
+        #   File.write(Time.now.strftime('dump/zlib_buf_err_%H_%M_%S.%6N.dump'), content_bytes.pack('C*'))
+        #   opc = 0
+        #   puts 'buf err'
+        # end
       elsif protocol == Constants::KAD_PROTOCOL
         # do nothing
       else
@@ -287,7 +332,7 @@ module Kademlia
       end
 
       @opcode = Constants::OPCODE_NAME[opc]
-      LOG.log 'packet', "Error!!!! Unknown opcode #{opc}" unless @opcode
+      LOG.logt 'packet', "Error!!!! Unknown opcode #{opc}" unless @opcode
       @bytes = content_bytes
       case @opcode
         when :kad2_res
@@ -305,6 +350,7 @@ module Kademlia
               )
             rescue Exception => e
               puts e
+              puts e.backtrace_locations
             end
           end
           count.times do |i|
@@ -318,7 +364,7 @@ module Kademlia
               remote_udp_port: remote_port
           }
         when :kad2_search_res
-          @content = parse_search_req(@bytes)
+          @content = parse_search_res(@bytes)
           @content[:remote_ip] = remote_ip
           @content[:remote_udp_port] = remote_port
         else

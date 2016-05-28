@@ -50,7 +50,7 @@ module Kademlia
       -1
     end
 
-    def to_json
+    def to_json(state = nil)
       kad_bytes.to_json
     end
 

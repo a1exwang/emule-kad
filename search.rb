@@ -50,9 +50,21 @@ module Kademlia
       end
     end
 
+    def find_contact(kad_id)
+      @contact_generations.each do |g|
+        g.each do |c|
+          if c[:contact].id == kad_id
+            return c
+          end
+        end
+      end
+      nil
+    end
+
     ##
     #
     def add_contact(contact, parent = nil)
+      # return if find_contact(contact.id)
       if parent
         generation = parent[:generation] + 1
       else
