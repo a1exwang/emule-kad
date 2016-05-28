@@ -19,7 +19,7 @@ module Kademlia
             @mtu = json['mtu']
 
             json['kad']['id'] = @kad_id
-            File.write(file_path, json.to_json)
+            File.write(file_path, JSON.pretty_generate(json))
           rescue JSON::JSONError
             raise "#{@file_path} format error"
           end

@@ -4,8 +4,10 @@ module Kademlia
 
   class Search
     attr_reader :id
+    attr_reader :search_uid
     def initialize(id)
       @id = id
+      @search_uid = Time.now.strftime('search-%Y-%m-%d_%H_%M_%S.%6N')
     end
   end
 
@@ -131,9 +133,38 @@ module Kademlia
 
   class KeywordSearch < NodeIDSearch
     attr_reader :keyword
+    attr_reader :last_search_res_at
+    attr_reader :results
+    attr_accessor :saved
     def initialize(keyword, init_contacts)
       @keyword = keyword
+      @saved = false
+      @last_search_res_at = Time.now
+      @results = {}
       super(Kademlia::KadID.from_utf8_str(keyword), init_contacts)
     end
+
+    def add_search_res(result)
+      @last_search_res_at = Time.now
+      if @results[result[:sender_id]]
+        @results[result[:sender_id]] << result[:answers]
+      else
+        @results[result[:sender_id]] = result[:answers]
+      end
+    end
+
+    def search_name
+      "S_#{@keyword}_uid_#{@search_uid}"
+    end
+
+    def to_json(state)
+      {
+          name: search_name,
+          keyword: @keyword,
+          id: @id,
+          results: @results
+      }.to_json(state)
+    end
+
   end
 end

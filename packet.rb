@@ -1,4 +1,5 @@
 require_relative 'utils'
+require_relative 'log'
 require 'rc4'
 require 'digest/md5'
 require 'openssl'
@@ -41,6 +42,7 @@ TAG_NAME_MAP = {
     TAG_MEDIA_BITRATE => 'media_bitrate',
     TAG_MEDIA_CODEC => 'media_codec',
 }
+PacketEOFError = Class.new Exception
 def parse_search_res(bytes)
 
   content = Kademlia::Utils::BinaryParser.parse(bytes) do |field|
@@ -56,26 +58,37 @@ def parse_search_res(bytes)
   tag_bytes = bytes[0x22..-1]
 
   def parse_str(bytes, start)
+    raise PacketEOFError, "max bytes: #{bytes.size}, off #{start+2}" if start + 2 >= bytes.size
     len = bytes[start] + (bytes[start+1] << 8)
+    raise PacketEOFError, "max bytes: #{bytes.size}, off #{start+2+len}" if start + 2 + len >= bytes.size
     [bytes[start+2, len].pack('C*').force_encoding('utf-8'), len+2]
   end
-
   def parse_uint16(bytes, start)
+    raise PacketEOFError if start + 2 >= bytes.size
     bytes[start, 2].pack('C2').unpack('v').first
   end
   def parse_uint32(bytes, start)
+    raise PacketEOFError if start+4 >= bytes.size
     bytes[start, 4].pack('C4').unpack('V').first
   end
+  def parse_uint8(bytes, start)
+    raise PacketEOFError if start >= bytes.size
+    bytes[start]
+  end
   def parse_bsob(bytes, start)
+    raise PacketEOFError if start + 1 >= bytes.size
     len = bytes[start]
+    raise PacketEOFError if start+1 + len >= bytes.size
     [bytes[start + 1, len], len+1]
   end
   def parse_uint64(bytes, start)
+    raise PacketEOFError if start+8 >= bytes.size
     bytes[start, 4].pack('C4').unpack('V').first +
       (bytes[start+4, 4].pack('C4').unpack('V').first << 32)
   end
 
   def parse_tag(bytes, start)
+    raise PacketEOFError if start >= bytes.size
     type = bytes[start]
     name, len = parse_str(bytes, start + 1)
     readable_name = TAG_NAME_MAP[name] || name.unpack('C').first.to_s
@@ -91,7 +104,7 @@ def parse_search_res(bytes)
         tag[readable_name] = parse_uint16(bytes, start + size)
         len = 2
       when TAG_TYPE_UINT8
-        tag[readable_name] = bytes[start + size]
+        tag[readable_name] = parse_uint8(bytes, start + size)
         len = 1
       when TAG_TYPE_BSOB
         tag[readable_name], len = parse_bsob(bytes, start + size)
@@ -105,6 +118,7 @@ def parse_search_res(bytes)
     [tag, size]
   end
   def parse_answer(bytes, start)
+    raise PacketEOFError if start+16+1 >= bytes.size
     answer = Kademlia::KadID.from_kad_bytes(bytes[start, 16])
     tag_count = bytes[start+16]
     size = 16 + 1
@@ -120,10 +134,20 @@ def parse_search_res(bytes)
   begin
     current = 0
     answers = []
-    content[:count].times do
-      ans, size = parse_answer(tag_bytes, current)
-      answers << ans
-      current += size
+    content[:count].times do |i|
+      begin
+        ans, size = parse_answer(tag_bytes, current)
+        answers << ans
+        current += size
+      rescue Exception => e
+        if e.is_a? PacketEOFError
+          LOG.logt('parse_search_res', "EOF at answer index #{i}")
+          break
+        else
+          LOG.logt('parse_search_res', "Exception at answer index #{i}")
+          raise e
+        end
+      end
     end
   rescue Exception => e
     puts e
@@ -131,11 +155,15 @@ def parse_search_res(bytes)
     File.write(Time.now.strftime('dump/packet-crash-%H-%M-%S.%6N'), bytes.pack('C*'))
   end
 
-  { sender_id: content[:sender_id], target_id: content[:target_id], answers: answers }
+  {
+      sender_id: content[:sender_id],
+      target_id: content[:target_id],
+      answers: answers
+  }
 end
 #
-str = File.read('dump/packet-crash-10-29-55.638736')
-res = parse_search_res(str.bytes)
+# str = File.read('dump/packet-crash-11-04-40.614923')
+# res = parse_search_res(str.bytes)
 
 module Kademlia
   class Packet
@@ -227,7 +255,7 @@ module Kademlia
       end
 
       def self.check_and_encrypt(ip, kad_id, raw_packet, version)
-        return raw_packet #if version < Kademlia::Constants::KAD_VERSION_MIN_ENCRYPTION
+        return raw_packet if version < Kademlia::Constants::KAD_VERSION_MIN_ENCRYPTION
 
         # Random.rand(0..65535)
         self.encrypt_packet(0, ip, kad_id, raw_packet)
@@ -303,9 +331,12 @@ module Kademlia
     end
 
     attr_reader :opcode, :content, :bytes
+    attr_reader :remote_ip, :remote_udp_port, :target_id
 
-    def initialize(kad_client, str, ip, id, remote_ip, remote_port)
-      decrypted_bytes = Helpers.check_and_decrypt(ip, id, str.bytes, remote_ip, remote_port)
+    def initialize(kad_client, str, self_ip, id, contact)
+      remote_ip = contact.ip
+      remote_port = contact.udp_port
+      decrypted_bytes = Helpers.check_and_decrypt(self_ip, id, str.bytes, remote_ip, remote_port)
       protocol, opc = decrypted_bytes[0..1]
       content_bytes = decrypted_bytes[2..-1]
 
@@ -334,6 +365,8 @@ module Kademlia
       @opcode = Constants::OPCODE_NAME[opc]
       LOG.logt 'packet', "Error!!!! Unknown opcode #{opc}" unless @opcode
       @bytes = content_bytes
+      @remote_ip = remote_ip
+      @remote_udp_port = remote_port
       case @opcode
         when :kad2_res
           count = @bytes[0x10]

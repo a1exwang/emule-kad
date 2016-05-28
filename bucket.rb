@@ -89,6 +89,23 @@ module Kademlia
     ##
     # Bucket#update
 
+    ##
+    # search a contact from ip and port
+    # @param ip: IPAddress
+    # @param port: uint16
+    def find_contact_by_ip_port(ip, port)
+      if self.leaf?
+        @contacts.each do |c|
+          if c.ip == ip && c.udp_port == port
+            return c
+          end
+        end
+      else
+        @left.each(&block)
+        @right.each(&block)
+      end
+      nil
+    end
 
     ##
     # Bucket#contact_count

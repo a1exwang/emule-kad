@@ -9,9 +9,6 @@ require_relative 'search'
 require 'socket'
 
 Thread.abort_on_exception = true
-
-LOG = Kademlia::Utils::Logger.new
-
 class KadClient
   def initialize(bootstrap_contacts)
     @prefs = Kademlia::Utils::Prefs.new
@@ -44,19 +41,12 @@ class KadClient
         data, addr = @udp_socket.recvfrom(@prefs.mtu)
         _, remote_port, _, _remote_ip = addr
         remote_ip = Kademlia::Utils::IPAddress.new(_remote_ip)
-
-        begin
-          packet = Kademlia::Packet.new(self, data, @ip, @prefs.kad_id, remote_ip, remote_port)
-          if @message_queue
-            @message_queue << {
-                name: packet.opcode.to_s,
-                content: packet
-            }
-          end
-          LOG.logt 'UDP thread', "received from #{addr[2]}:#{addr[1]}, kad opcode '#{packet.opcode}'"
-        rescue Kademlia::Error::InvalidKadPacket => e
-          puts e
-        end
+        @message_queue << {
+            name: 'receive_udp_packet',
+            ip: remote_ip,
+            port: remote_port,
+            data: data
+        }
       end
     end
   end
@@ -161,6 +151,20 @@ class KadClient
 
     q = nil
     q = Kademlia::MessageQueue.new do |e|
+      e.on('receive_udp_packet') do |message|
+        remote_ip = message[:ip]
+        remote_port = message[:port]
+        c = @root_bucket.find_contact_by_ip_port(remote_ip, remote_port)
+        data = message[:data]
+        packet = Kademlia::Packet.new(self, data, @ip, @prefs.kad_id, c)
+        if @message_queue
+          @message_queue << {
+              name: packet.opcode.to_s,
+              content: packet
+          }
+        end
+        LOG.logt 'UDP thread', "received from #{remote_ip}:#{remote_port}, kad opcode '#{packet.opcode}'"
+      end
       e.on('kad2_res') do |message|
         packet = message[:content]
 
@@ -186,7 +190,13 @@ class KadClient
       e.on('kad2_search_res') do |message|
         packet = message[:content]
         LOG.logt('kad2_find_res', "packet: #{packet}")
-        File.write(Time.now.strftime('dump/res-%H-%M-%S.%6N.json'), packet.content.to_json)
+        search = @searches.find do |x|
+          x.is_a?(Kademlia::KeywordSearch) && x.id == packet.content[:target_id]
+        end
+        if search
+          search.add_search_res(packet.content)
+        end
+        # File.write(Time.now.strftime('dump/res-%H-%M-%S.%6N.json'), JSON.pretty_generate(packet.content))
         # parse kad2 find res and add to result list
       end
 
@@ -195,6 +205,15 @@ class KadClient
       end
       e.on('small_timer') do
         search_keyword('abc')
+      end
+      e.on('save_search_results') do
+        @searches.each do |s|
+          if s.is_a?(Kademlia::KeywordSearch) && !s.saved && Time.now - s.last_search_res_at > 10 # 10 seconds of silence means the search has stalled
+            File.write('results/' + s.search_name + '.json', JSON.pretty_generate(s))
+            s.saved = true
+            LOG.logt('save_search_results', "search '#{s.search_name}' done, save to .json")
+          end
+        end
       end
       e.on('udp_send') do |message|
         ip, port, str = message[:ip], message[:port], message[:str]
@@ -237,6 +256,12 @@ class KadClient
     init_queue(q)
     q.send_delay(0.5, name: 'bootstrap_timer')
     Thread.new { sleep 8; self.search_keyword('abc') }
+    Thread.new do
+      loop do
+        sleep 5
+        q << { name: 'save_search_results' }
+      end
+    end
     # Thread.new { send_find_key_request(main, 'abc') }
     self.start
   end
