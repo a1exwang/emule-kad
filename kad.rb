@@ -121,7 +121,7 @@ class KadClient
 
   def start
     # add_contact(LOCAL_CONTACT)
-    add_contact(LENOVO_CONTACT)
+    # add_contact(LENOVO_CONTACT)
     merge_bootstrap_contacts
 
     q = nil
@@ -242,8 +242,9 @@ class KadClient
         callback = message[:callback]
 
         search = @searches.find { |s| s.search_uid == search_uid }
+        dup_search = Marshal.load(Marshal.dump(search))
         if search
-          callback.call(search.to_json)
+          callback.call(dup_search)
         else
           callback.call(nil)
         end

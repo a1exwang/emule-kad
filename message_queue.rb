@@ -93,7 +93,7 @@ module Kademlia
               end
               LOG.logt 'Message Queue', "message unhandled #{message}" unless handled
             else
-              raise Error::UnknownMessageError, "message name: #{name}"
+              LOG.logt 'Message Queue', "unknown message #{message}"
             end
         end
       end
