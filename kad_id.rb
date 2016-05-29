@@ -90,6 +90,10 @@ module Kademlia
       be_bytes.map { |x| '%02x' % x }.join(' ')
     end
 
+    def to_s_ed2k
+      be_bytes.map { |x| '%02x' % x }.join('').upcase
+    end
+
   end
 
 end

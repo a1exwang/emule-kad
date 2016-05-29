@@ -3,7 +3,7 @@ module Kademlia
   module Utils
     class Logger
       TAG_MAX_WIDTH = 16
-      def initialize(target = nil, attr = 'w')
+      def initialize(target = nil, attr = 'w', use_lock = true)
         if target.is_a?(String)
           @stream = File.open(target, attr)
         else
@@ -29,6 +29,9 @@ module Kademlia
           end
           result
         end
+        if use_lock
+          @lock = Mutex.new
+        end
       end
       def set_format(&block)
         raise ArgumentError unless block
@@ -40,8 +43,12 @@ module Kademlia
       end
       def logt(tag, str, indent = 0, level = 'verbose'.to_sym)
         str = @formatter.call(tag, str, indent, level)
+        @lock&.lock
+
         @stream.write(str)
         @stream.flush
+
+        @lock&.unlock
       end
     end
   end

@@ -1,3 +1,5 @@
+require_relative 'log'
+
 module Kademlia
   class MessageQueue
     module Error
@@ -8,6 +10,26 @@ module Kademlia
 
     # :initialized, :running, :stopped
     attr_reader :status
+
+    DEFAULT_MAX_WORKER = 10
+    def init_workers(n)
+      @worker_queue = Queue.new
+      @workers = Array.new(n) do |i|
+        Thread.new do
+          job = @worker_queue.deq
+          job.call
+        end
+      end
+    end
+
+    ##
+    # MessageQueue#add_worker_job(job)
+    #   Add a job to worker queue.
+    #   The +job+ is executed concurrently, so you can only call MessageQueue#<< or send_delay method.
+    # @param job: Proc object (or any object that respond to 'call')
+    def add_worker_job(&job)
+      @worker_queue << job
+    end
 
     ##
     # create a message queue and set handlers with block
@@ -24,11 +46,12 @@ module Kademlia
     #     handler.on(name, lambda) do |m|
     #     end
     # message_handler = { name: 'a', filter: , handler:, ... }
-    def initialize(&block)
+    def initialize(worker_count = DEFAULT_MAX_WORKER, &block)
       @queue = Queue.new
       @handlers = {}
       @status = :initialized
       add_handlers(&block)
+      init_workers(worker_count)
     end
 
     ##
@@ -62,6 +85,14 @@ module Kademlia
         sleep seconds
         self << message
       end
+    end
+
+    def send_block(&block)
+      raise ArgumentError unless block
+      self << {
+          name: '__block',
+          __block: block
+      }
     end
 
     def quit

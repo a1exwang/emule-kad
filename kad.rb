@@ -30,6 +30,8 @@ LENOVO_CONTACT = Kademlia::Contact.new(
 
 class KadClient
 
+  ##
+  # Singleton
   def self.instance
     unless @the_instance
       @the_instance = KadClient.new
@@ -82,10 +84,11 @@ class KadClient
         search: search
     }
   end
-  def msg_search_keyword(keyword)
+  def msg_search_keyword(keyword, &block)
     target_id = Kademlia::KadID.from_utf8_str(keyword)
     init_contacts = @root_bucket.find_closest(target_id, Kademlia::NodeIDSearch::FIND_NODE_COUNT)
     search = Kademlia::KeywordSearch.new(keyword, init_contacts)
+    search.add_finished_callback(block) if block
     @searches << search
     @message_queue << {
         name: 'find_node',
@@ -93,10 +96,14 @@ class KadClient
     }
     search.search_uid
   end
-
-  def msg_get_search_status(search_uid, &block)
-    
+  def msg_get_final_search_results(search_uid, &block)
+    @message_queue << {
+        name: 'api_get_final_search_results',
+        search_uid: search_uid,
+        callback: block
+    }
   end
+
   def msg_get_search_results(search_uid, &block)
     @message_queue << {
         name: 'api_get_search_results',
@@ -132,15 +139,20 @@ class KadClient
         remote_ip = message[:ip]
         remote_port = message[:port]
         c = @root_bucket.find_contact_by_ip_port(remote_ip, remote_port)
-        data = message[:data]
-        packet = Kademlia::Packet.new(self, data, @ip, @prefs.kad_id, c)
-        if @message_queue
-          @message_queue << {
-              name: packet.opcode.to_s,
-              content: packet
-          }
+        if c
+          data = message[:data]
+          packet = Kademlia::Packet.new(self, data, @ip, @prefs.kad_id, c)
+          if @message_queue
+            @message_queue << {
+                name: packet.opcode.to_s,
+                content: packet
+            }
+          end
+          LOG.logt 'UDP thread', "received from #{remote_ip}:#{remote_port}, kad opcode '#{packet.opcode}'"
+        else
+          LOG.logt 'UDP thread', "received from unknown end point '#{remote_ip}:#{remote_port}'"
         end
-        LOG.logt 'UDP thread', "received from #{remote_ip}:#{remote_port}, kad opcode '#{packet.opcode}'"
+
       end
       e.on('udp_send') do |message|
         ip, port, str = message[:ip], message[:port], message[:str]
@@ -195,17 +207,19 @@ class KadClient
         msg_search_keyword('abc')
       end
 
-      e.on('save_search_results') do
-        s = @searches.find do |s|
+      e.on('search_finished_worker') do
+        finished_searches = @searches.select do |s|
           # 10 seconds of silence means the search has stalled
-          s.is_a?(Kademlia::KeywordSearch) && !s.saved && Time.now - s.last_search_res_at > 10
+          s.is_a?(Kademlia::KeywordSearch) && s.need_on_finished?
         end
-        if s
-          File.write('results/' + s.search_name + '.json', JSON.pretty_generate(s))
-          s.saved = true
-          LOG.logt('save_search_results', "search '#{s.search_name}' done, save to .json")
+        
+        finished_searches.each do |s|
+          s.on_finished
+          # File.write('results/' + s.search_name + '.json', JSON.pretty_generate(s))
+          # LOG.logt('search_finished_worker', "search '#{s.search_name}' done, save to .json")
         end
       end
+
       e.on('find_node') do |message|
         search = message[:search]
         kad_id = search.id
@@ -233,23 +247,22 @@ class KadClient
         end
       end
 
-      # api messages
-      e.on('api_get_search_status') do |message|
-
-      end
       e.on('api_get_search_results') do |message|
         search_uid = message[:search_uid]
         callback = message[:callback]
 
         search = @searches.find { |s| s.search_uid == search_uid }
         dup_search = Marshal.load(Marshal.dump(search))
-        if search
-          callback.call(dup_search)
-        else
-          callback.call(nil)
-        end
+        # including nil
+        callback.call(dup_search)
       end
+      e.on('api_get_final_search_results') do |message|
+        search_uid = message[:search_uid]
+        callback = message[:callback]
 
+        search = @searches.find { |s| s.search_uid == search_uid }
+        search.add_finished_callback(callback) if search
+      end
     end
 
     @message_queue = q
@@ -258,7 +271,7 @@ class KadClient
     Thread.new do
       loop do
         sleep 5
-        q << { name: 'save_search_results' }
+        q << { name: 'search_finished_worker' }
       end
     end
     Thread.new do

@@ -1,4 +1,5 @@
 require_relative 'kad_id'
+require 'uri'
 
 module Kademlia
 
@@ -136,12 +137,16 @@ module Kademlia
     attr_reader :last_search_res_at
     attr_reader :results
     attr_accessor :saved
+    attr_accessor :finished_callbacks
+    attr_reader :done
 
     def initialize(keyword, init_contacts)
       @keyword = keyword
       @saved = false
       @last_search_res_at = Time.now
       @results = {}
+      @finished_callbacks = []
+      @done = false
       super(Kademlia::KadID.from_utf8_str(keyword), init_contacts)
     end
 
@@ -165,6 +170,40 @@ module Kademlia
           id: @id,
           results: @results
       }.to_json(state)
+    end
+
+    def add_finished_callback(cb)
+      if cb
+        @finished_callbacks << cb
+      end
+    end
+
+    def done?
+      @done
+    end
+
+    def need_on_finished?
+      !@done && Time.now - @last_search_res_at > 10
+    end
+
+    def on_finished
+      @done = true
+      @finished_callbacks.each do |cb|
+        cb.call(self)
+      end
+    end
+
+    def results_ed2k
+      ed2ks = []
+      @results.each do |sender_id, answers|
+        answers.each do |a|
+          file_name = URI.encode(a[:tags]['file_name'])
+          file_size = a[:tags]['file_size'] || 100000000
+          hash = a[:answer].to_s_ed2k
+          ed2ks << "ed2k://|file|#{file_name}|#{file_size}|#{hash}|/"
+        end
+      end
+      ed2ks
     end
 
   end

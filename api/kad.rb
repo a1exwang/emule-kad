@@ -2,8 +2,10 @@ require_relative '../log'
 require_relative '../kad'
 require 'sinatra'
 require 'json'
-
 require 'monitor'
+require 'sinatra/config_file'
+require 'sinatra/json'
+
 # https://gist.github.com/pettyjamesm/3746457
 class Semaphore
 
@@ -52,12 +54,14 @@ class Semaphore
 end
 
 class KadApi < Sinatra::Base
+  register Sinatra::ConfigFile
+
   # use Rack::Auth::Basic, 'Restricted Area' do |username, password|
   #   username == 'alexwang' and password == '123'
   # end
 
   set show_exceptions: :after_handler
-
+  config_file 'config/sinatra.yml'
   ApiError = Class.new Exception
 
   error JSON::JSONError do
@@ -76,11 +80,24 @@ class KadApi < Sinatra::Base
   end
   not_found do
     status 404
-    { status: :not_found }.to_json
+    json status: :not_found
   end
 
-  get '/api/v1/kad/search_status' do
-    { status: :ok }.to_json
+  get '/api/v1/kad/search_final_results_sync' do
+    search_uid = params['search_uid']
+    raise ApiError, 'parameter error' unless search_uid
+
+    results = []
+    # sem = ::Semaphore.new
+    sem = Queue.new
+    KadClient.instance.msg_get_final_search_results(search_uid) do |s|
+      results = s.results
+      # sem.signal
+      sem.enq 0
+    end
+    sem.deq
+
+    { status: :ok, results: results }.to_json
   end
 
   get '/api/v1/kad/search_results' do
@@ -88,12 +105,14 @@ class KadApi < Sinatra::Base
     raise ApiError, 'parameter error' unless search_uid
 
     results = []
-    sem = ::Semaphore.new
+    # sem = ::Semaphore.new
+    sem = Queue.new
     KadClient.instance.msg_get_search_results(search_uid) do |r|
       results = r
       sem.signal
+      sem.enq 0
     end
-    sem.wait
+    sem.deq
 
     { status: :ok, results: results }.to_json
   end
@@ -104,4 +123,22 @@ class KadApi < Sinatra::Base
     id = KadClient.instance.msg_search_keyword(keyword)
     { status: :ok, search_uid: id }.to_json
   end
+
+  post '/api/v1/kad/search_sync' do
+    keyword = params['keyword']
+    raise ApiError, 'parameter error' unless keyword
+    # sem = ::Semaphore.new
+    sem = Queue.new
+    results = []
+    stream do |out|
+      out << ' '
+      KadClient.instance.msg_search_keyword(keyword) do |s|
+        results = s.results_ed2k
+        sem.enq 0
+      end
+      sem.deq
+      out << { status: :ok, results: results.uniq }.to_json
+    end
+  end
+
 end
