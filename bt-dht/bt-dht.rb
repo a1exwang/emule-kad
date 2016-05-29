@@ -10,7 +10,7 @@ MAX_PAGE = 100
 module DHT
   class BTDigg
     def initialize
-      @queue = Kademlia::MessageQueue.new do |e|
+      @queue = Kademlia::MessageQueue.new(20) do |e|
         e.on('search_one_page_done') do |message|
           cb = message[:callback]
           results, total_pages = message[:results], message[:total_pages]
@@ -90,9 +90,7 @@ module DHT
     def start_blocking
       @queue.start_blocking
     end
-
   end
-
 end
 
 btdigg = DHT::BTDigg.new
@@ -102,5 +100,3 @@ btdigg.search_limit_async('abc', 100) do |results|
 end
 
 btdigg.start_blocking
-
-

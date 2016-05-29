@@ -11,7 +11,7 @@ module Kademlia
     # :initialized, :running, :stopped
     attr_reader :status
 
-    DEFAULT_MAX_WORKER = 10
+    DEFAULT_MAX_WORKER = 4
     def init_workers(n)
       @worker_queue = Queue.new
       @workers = Array.new(n) do |i|
