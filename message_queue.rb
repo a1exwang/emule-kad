@@ -16,8 +16,10 @@ module Kademlia
       @worker_queue = Queue.new
       @workers = Array.new(n) do |i|
         Thread.new do
-          job = @worker_queue.deq
-          job.call
+          loop do
+            job = @worker_queue.deq
+            job.call
+          end
         end
       end
     end
@@ -93,6 +95,14 @@ module Kademlia
           name: '__block',
           __block: block
       }
+    end
+
+    def clear
+      @queue.clear
+    end
+
+    def clear_worker
+      @worker_queue.clear
     end
 
     def quit

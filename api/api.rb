@@ -1,59 +1,12 @@
 require_relative '../log'
 require_relative '../kad'
+require_relative '../bt-dht/bt-dht'
 require 'sinatra'
 require 'json'
-require 'monitor'
 require 'sinatra/config_file'
 require 'sinatra/json'
 
-# https://gist.github.com/pettyjamesm/3746457
-class Semaphore
-
-  def initialize(max_val = nil)
-    max_val = max_val.to_i unless max_val.nil?
-    raise ArgumentError.new('Semaphores must use a positive maximum value or have no maximum!') if max_val and max_val <= 0
-    @max   = max_val || -1
-    @count = 0
-    @mon   = Monitor.new
-    @d_wait = @mon.new_cond
-    @u_wait = @mon.new_cond
-  end
-
-  def count
-    @mon.synchronize { @count }
-  end
-
-  def up!(number = 1)
-    if number > 1
-      number.times { up!(1) }
-      count
-    else
-      @mon.synchronize do
-        @u_wait.wait while @max > 0 and @count == @max
-        @d_wait.signal if @count == 0
-        @count += 1
-      end
-    end
-  end
-
-  def down!(number = 1)
-    if number > 1
-      number.times { down!(1) }
-      count
-    else
-      @mon.synchronize do
-        @d_wait.wait while @count == 0
-        @u_wait.signal if @count == @max
-        @count -= 1
-      end
-    end
-  end
-
-  alias_method :wait, :down!
-  alias_method :signal, :up!
-end
-
-class KadApi < Sinatra::Base
+class Api < Sinatra::Base
   register Sinatra::ConfigFile
 
   # use Rack::Auth::Basic, 'Restricted Area' do |username, password|
@@ -99,7 +52,6 @@ class KadApi < Sinatra::Base
 
     { status: :ok, results: results }.to_json
   end
-
   get '/api/v1/kad/search_results' do
     search_uid = params['search_uid']
     raise ApiError, 'parameter error' unless search_uid
@@ -116,14 +68,12 @@ class KadApi < Sinatra::Base
 
     { status: :ok, results: results }.to_json
   end
-
   post '/api/v1/kad/search' do
     keyword = params['keyword']
     raise ApiError, 'parameter error' unless keyword
     id = KadClient.instance.msg_search_keyword(keyword)
     { status: :ok, search_uid: id }.to_json
   end
-
   post '/api/v1/kad/search_sync' do
     keyword = params['keyword']
     raise ApiError, 'parameter error' unless keyword
@@ -134,6 +84,23 @@ class KadApi < Sinatra::Base
       out << ' '
       KadClient.instance.msg_search_keyword(keyword) do |s|
         results = s.results_ed2k
+        sem.enq 0
+      end
+      sem.deq
+      out << { status: :ok, results: results.uniq }.to_json
+    end
+  end
+
+  get '/api/v1/btdht/search_sync' do
+    keyword = params['keyword']
+    limit = params['limit']&.to_i || 100
+
+    stream do |out|
+      out << ' '
+      sem = Queue.new
+      results = []
+      DHT::BTDigg.instance.search_limit_async(keyword, limit) do |r|
+        results = r
         sem.enq 0
       end
       sem.deq

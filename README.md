@@ -3,7 +3,8 @@
     - ~~bootstrap from known contacts~~
     - ~~Kad buckets~~
     - ~~Kad search~~
-    - API Server
+    - ~~API Server(long poll)~~
+    - Ruby Fiber
     - Standard logger
 - design
     - parse packet using DSL

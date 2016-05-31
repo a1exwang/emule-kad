@@ -5,7 +5,7 @@ require_relative 'kad_id'
 require_relative 'message_queue'
 require_relative 'bucket'
 require_relative 'search'
-require_relative 'api/kad'
+require_relative 'api/api'
 
 require 'socket'
 
@@ -126,7 +126,7 @@ class KadClient
     msg_socket_send(contact.ip, contact.udp_port, bytes.pack('C*'))
   end
 
-  def start
+  def start_blocking
     # add_contact(LOCAL_CONTACT)
     # add_contact(LENOVO_CONTACT)
     merge_bootstrap_contacts
@@ -274,14 +274,18 @@ class KadClient
         q << { name: 'search_finished_worker' }
       end
     end
-    Thread.new do
-      KadApi.run!(host: 'localhost', port: 8223)
-      @message_queue.quit
-    end
+    # Thread.new do
+    #   Api.run!(host: 'localhost', port: 8223)
+    #   @message_queue.quit
+    # end
     # Thread.new { send_find_key_request(main, 'abc') }
 
     init_udp
     @message_queue.start_blocking
+  end
+
+  def kill
+    @message_queue.quit
   end
 
   private

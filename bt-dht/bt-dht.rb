@@ -9,16 +9,13 @@ MAX_PAGE = 100
 
 module DHT
   class BTDigg
-    def initialize
-      @queue = Kademlia::MessageQueue.new(20) do |e|
-        e.on('search_one_page_done') do |message|
-          cb = message[:callback]
-          results, total_pages = message[:results], message[:total_pages]
-          cb.call(results, total_pages)
-        end
+    def self.instance
+      unless @instance
+        @instance = BTDigg.new
       end
+      @instance
     end
-    def search_one_page(keyword, page = 0)
+    def self.search_one_page(keyword, page = 0)
       raise ArgumentError, 'invalid page' unless page.is_a?(Integer) && 0 <= page && page < MAX_PAGE
       raise ArgumentError, 'invalid keyword' unless keyword.is_a?(String)
 
@@ -59,28 +56,32 @@ module DHT
       [results, total_pages]
     end
 
-    def search_one_page_async(keyword, page = 0, &block)
+    def search_one_page_async(keyword, page = 0, &callback)
       @queue.add_worker_job do
-        results, total_pages = search_one_page(keyword, page)
+        results, total_pages = BTDigg.search_one_page(keyword, page)
         @queue << {
             name: 'search_one_page_done',
-            callback: block,
+            callback: callback,
             results: results,
             total_pages: total_pages
         }
       end
     end
 
-    def search_limit_async(keyword, limit = 100, &block)
+    def search_limit_async(keyword, limit = 100, &callback)
+      r = Random.rand(0...(2<<64))
+      @searches[r] = { keyword: keyword, limit: limit, callback: callback }
+
       total_results = []
       search_one_page_async(keyword, 0) do |results, total_pages|
         total_results += results
         (1...total_pages).each do |i|
           search_one_page_async(keyword, i) do |res, _|
             total_results += res
-            if total_results.size >= limit
-              block.call(total_results)
-              @queue.quit
+            if total_results.size >= limit && callback
+              callback.call(total_results)
+              callback = nil
+              @queue.clear_worker
             end
           end
         end
@@ -90,13 +91,30 @@ module DHT
     def start_blocking
       @queue.start_blocking
     end
+
+    def kill
+      @queue.quit
+    end
+
+    private
+    def initialize
+      @queue = Kademlia::MessageQueue.new(20) do |e|
+        e.on('search_one_page_done') do |message|
+          cb = message[:callback]
+          results, total_pages = message[:results], message[:total_pages]
+          cb.call(results, total_pages)
+        end
+      end
+
+      @searches = {}
+    end
   end
 end
 
-btdigg = DHT::BTDigg.new
-
-btdigg.search_limit_async('abc', 100) do |results|
-  puts results
-end
-
-btdigg.start_blocking
+# btdigg = DHT::BTDigg.new
+#
+# btdigg.search_limit_async('abc', 100) do |results|
+#   puts results
+# end
+#
+# btdigg.start_blocking
