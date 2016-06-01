@@ -94,7 +94,6 @@ class Api < Sinatra::Base
   get '/api/v1/btdht/search_sync' do
     keyword = params['keyword']
     limit = params['limit']&.to_i || 100
-
     stream do |out|
       out << ' '
       sem = Queue.new
