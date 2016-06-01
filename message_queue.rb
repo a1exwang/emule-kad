@@ -114,7 +114,14 @@ module Kademlia
     def start_blocking
       @status = :running
       loop do
-        message = @queue.pop
+        begin
+          message = @queue.pop
+        rescue Exception => e
+          LOG.logt('MessageQueue', "@queue.pop exception '#{e.inspect}'")
+          LOG.logt('MessageQueue', 'Queue empty with no workers working, job done!')
+          break
+        end
+
         name = message[:name].to_s
         case name
           when '__block'
