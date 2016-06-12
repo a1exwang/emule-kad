@@ -73,9 +73,9 @@ module Kademlia
         children = [@left, @right]
         if kad_id.bit(MAX_DEPTH - 1 - @depth) != @self_kad_id.bit(MAX_DEPTH - 1 - @depth)
           children.reverse!
-          puts 'go right'
+          LOG.logt('bucket#find_closest', 'go right')
         else
-          puts 'go left'
+          LOG.logt('bucket#find_closest', 'go left')
         end
 
         targets = children.first.find_closest(kad_id, n)
@@ -101,8 +101,8 @@ module Kademlia
           end
         end
       else
-        @left.each(&block)
-        @right.each(&block)
+        @left&.find_contact_by_ip_port(ip, port)
+        @right&.find_contact_by_ip_port(ip, port)
       end
       nil
     end

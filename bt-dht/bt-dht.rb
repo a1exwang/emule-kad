@@ -335,31 +335,31 @@ module DHT
     end
   end
 end
-
-crawler = DHT::Crawler.instance
-videos = Video.where('designation LIKE ?', 'kawd%').where(status: TASK_STATUS_CREATED)
-count = 0
-videos.each do |video|
-  next if video.links.size > 0
-  count += 1
-  crawler.search_async(video.designation, 10, DHT::BTDiggWs) do |results|
-    results.each do |result|
-      uri_link = UriLink.create(link: result)
-      link = Link.create(film_id: video.id)
-      uri_link.base = link
-      uri_link.save
-      link.real = uri_link
-      link.save
-    end
-    if results.size == 0
-      LOG.logt('add video link', "#{video.designation}: no result!")
-    else
-      LOG.logt('add video link', "#{video.designation}: #{results.size} results!")
-    end
-  end
-end
-
-crawler.start_blocking
-
-LOG.logt('main', "videos total #{count}")
+#
+# crawler = DHT::Crawler.instance
+# videos = Video.where('designation LIKE ?', 'kawd%').where(status: TASK_STATUS_CREATED)
+# count = 0
+# videos.each do |video|
+#   next if video.links.size > 0
+#   count += 1
+#   crawler.search_async(video.designation, 10, DHT::BTDiggWs) do |results|
+#     results.each do |result|
+#       uri_link = UriLink.create(link: result)
+#       link = Link.create(film_id: video.id)
+#       uri_link.base = link
+#       uri_link.save
+#       link.real = uri_link
+#       link.save
+#     end
+#     if results.size == 0
+#       LOG.logt('add video link', "#{video.designation}: no result!")
+#     else
+#       LOG.logt('add video link', "#{video.designation}: #{results.size} results!")
+#     end
+#   end
+# end
+#
+# crawler.start_blocking
+#
+# LOG.logt('main', "videos total #{count}")
 # DHT::BTDiggWs.get_results_by_html(File.read('a.html'))

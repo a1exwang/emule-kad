@@ -6,7 +6,7 @@ kad_client = KadClient.instance
 dht = DHT::BTDigg.instance
 
 Thread.new do
-  # kad_client.start_blocking
+  kad_client.start_blocking
 end
 Thread.new do
   dht.start_blocking
